@@ -16,8 +16,12 @@ library(here) # setting directories safely
 library(viridis) # color scheme
 library(USAboundaries) # county/state boundaries
 library(nhdplusTools) # USGS/NHD rivers data
+# further geospatial tools
 library(nngeo)
 library(measurements)
+library(lwgeom)
+library(elevatr)
+library(rgeos)
 
 poi_usgs_id <- "USGS-01589300"
 poi <- c(-76.7331944, 39.34588889)
@@ -195,7 +199,6 @@ mapview(gages_snapped, col.regions="cyan", layer.name="Snapped Gages") +
   mapview(yose_streams_proj, color="steelblue", layer.name="Flowlines") + 
   mapview(all_gages, col.regions="orange", layer.name="All Gages")
 
-library(lwgeom)
 
 # create a 1 meter buffer around snapped point
 gages_snapped_buff <- st_buffer(gages_snapped, 1)
@@ -238,3 +241,13 @@ mapview(segs_filt_dist, zcol="total_len_km", layer.name="Cumulative Flowline<br>
   mapview(poi_snapped, zcol="identifier", layer.name="USGS Gages")
 
 ############ Elvation ################
+
+# splite flowline into equal segments
+    ## pts <- gInterpolate(sp::SpatialLines(segs_filt_dist[1,]$geom), seq(0, 1, length.out = 5), normalized = TRUE)
+
+stplanr::line2points(segs_filt_dist) # ids = segs_filt_dist$comid
+
+# get startpoint from each segment
+# feed points to elevatr
+# create df of point longitudinal distance, and point elevation
+# plot
