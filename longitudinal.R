@@ -242,12 +242,43 @@ mapview(segs_filt_dist, zcol="total_len_km", layer.name="Cumulative Flowline<br>
 
 ############ Elvation ################
 
-# splite flowline into equal segments
-    ## pts <- gInterpolate(sp::SpatialLines(segs_filt_dist[1,]$geom), seq(0, 1, length.out = 5), normalized = TRUE)
-
-stplanr::line2points(segs_filt_dist) # ids = segs_filt_dist$comid
+# splite flowline into segments
+segs_breakup <- stplanr::line_breakup(segs_filt_dist,
+                                      st_buffer(stplanr::line_midpoint(segs_filt_dist), 1))
 
 # get startpoint from each segment
-# feed points to elevatr
+segs_points <- stplanr::line2points(segs_breakup) %>%
+  distinct()
+
+segs_elevations <- sf::st_as_sf(segs_points, coords = c("x", "y"), crs = 26910) %>%
+  select(-id) %>%
+  mutate(
+    elevatr::get_elev_point(geometry, src = 'aws', z = 14)
+  )
+
 # create df of point longitudinal distance, and point elevation
+# start with resplit strings by these points
+segs_hr <- st_collection_extract(lwgeom::st_split(distinct(segs_filt), st_buffer(segs_elevations, 2)), "LINESTRING") %>%
+  ## tibble::rownames_to_column(var = "rowid") %>%
+  ## mutate(rowid=as.integer(rowid)) %>%
+  stplanr::line_breakup(st_buffer(stplanr::line_midpoint(.), 1)) %>%
+  mutate(seg_len_m = units::drop_units(units::set_units(st_length(.), "m")),
+         seg_len_km = seg_len_m/1000) %>%
+  arrange(desc(hydroseq)) %>%
+  mutate(total_len_km = cumsum(seg_len_km)) %>%
+  # feed points to elevatr
+  mutate(
+    ## stplanr::line2points() %>%
+    elevation = elevatr::get_elev_point(stplanr::line_midpoint(.), src = 'aws', z = 14)$elevation
+  )
+
+segs_hr_calc <- segs_hr %>%
+    group_by(as.character(round(total_len_km, 1))) %>%
+    summarize(
+      elevation = mean(elevation),
+      longitudinal_km = mean(total_len_km)
+    )
+
 # plot
+ggplot(segs_hr_calc) +
+  geom_point(aes(x = scale(longitudinal_km), y = elevation))
