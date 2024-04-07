@@ -316,11 +316,115 @@ ggplot(segs_hr_calc) +
   )
 
 
+drainage_area_gage <- site_info$drain_area_va * 2.59
+
+
 ## Delineate watersed
-out <- ms_delineate_watershed(
-    lat = site_info$dec_lat_va,
-    long = site_info$dec_long_va,
-    crs = 4269,
-    write_dir = '/your/path',
-    write_name = 'example_site'
-)
+## out <- macrosheds::ms_delineate_watershed(
+##     lat = site_info$dec_lat_va,
+##     long = site_info$dec_long_va,
+##     crs = 4269,
+##     write_dir = 'data',
+##     write_name = paste("USGS-", site_info$site_no),
+##     ## write_name = "site_ws",
+##     spec_buffer_radius = as.integer(round(drainage_area_gage * 2)),
+##     spec_snap_distance_m = 150,
+##     spec_snap_method = 'standard',
+##     spec_dem_resolution = 10,
+##     spec_flat_increment = 0.01,
+##     spec_breach_method = 'basic',
+##     spec_burn_streams = TRUE,
+##     verbose = FALSE,
+##     confirm = FALSE
+## )
+
+## mapview('data/site_ws.shp')
+
+# looping multiple 'sheds
+segs_hr_calc <- segs_hr %>%
+    group_by(as.character(round(total_len_km, 0))) %>%
+    summarize(
+      elevation = mean(elevation),
+      longitudinal_km = mean(total_len_km)
+    ) %>%
+    mutate(
+      elevation_change = elevation - lag(elevation),
+      longitudinal_km_change = longitudinal_km - lag(longitudinal_km),
+      elevation_change = case_when(
+        is.na(elevation_change) ~ (max(elevation) - max(segs_hr$elevation)), .default = elevation_change
+      ),
+      longitudinal_km_change = case_when(
+        is.na(longitudinal_km_change) ~ min(longitudinal_km), .default = longitudinal_km_change
+      ),
+      gradient = elevation/longitudinal_km_change,
+      gradient_log10 = log10(gradient)
+    ) %>%
+  mutate(
+    xy_geom = lwgeom::st_endpoint(geom),
+    xy = st_coordinates(lwgeom::st_endpoint(geom)),
+  )
+
+for(i in 1:nrow(segs_hr_calc)) {
+
+    i_km = segs_hr_calc$longitudinal_km[i]
+    i_elevation = segs_hr_calc$elevation[i]
+
+    s = st_as_sf(d, coords=c("lonfix","latfix"), crs=26910)
+    strans = st_transform(segs_hr_calc$xy_geom, 4326)
+
+    strans_xy <- st_coordinates(strans)
+
+    out <- macrosheds::ms_delineate_watershed(
+        lat = strans_xy[,2][i],
+        long = strans_xy[,1][i],
+        crs = 4326,
+        write_dir = 'data',
+        write_name = as.character(paste0(site_info$site_no,'__', i_km , '_km__', i_elevation, 'elevation_m__run_', i)),
+        spec_buffer_radius = as.integer(round(drainage_area_gage * 2)),
+        spec_snap_distance_m = 150,
+        spec_snap_method = 'standard',
+        spec_dem_resolution = 10,
+        spec_flat_increment = 0.01,
+        spec_breach_method = 'basic',
+        spec_burn_streams = TRUE,
+        verbose = FALSE,
+        confirm = FALSE
+        )
+
+   outfile <- as.character(paste0("OUTFILE___", site_info$site_no,'__', i_km , '_km__', i_elevation, 'elevation_m__run_', i))
+
+   ## lapply(out, write, outfile, append=TRUE)
+
+   segs_hr_calc$ws_area_sqkm[i] <- out$watershed_area_ha/100
+}
+
+mapview('data/01589300__2.58323836796896_km__186.524elevation_m__run_1.shp')
+
+mapview('data/01589300__11.4809465017262_km__141.866885245902elevation_m__run_2.shp')
+
+mapview('data/01589300__19.4257695954962_km__122.427elevation_m__run_3.shp')
+
+mapview('data/01589300__25.5359735468933_km__112.353076923077elevation_m__run_4.shp')
+
+mapview('data/01589300__13.3996899637642_km__133.260454545455elevation_m__run_4.shp')
+
+mapview('data/01589300__16.5365323742472_km__125.906666666667elevation_m__run_8.shp')
+
+mapview('data/01589300__19.5097197625904_km__121.12elevation_m__run_11.shp')
+
+## segs_hr_calc$ws_area_sqkm[1] <- st_area(st_read('data/01589300__2.58323836796896_km__186.524elevation_m__run_1.shp'))
+## segs_hr_calc$ws_area_sqkm[2] <- st_area(st_read('data/01589300__11.4809465017262_km__141.866885245902elevation_m__run_2.shp'))
+## segs_hr_calc$ws_area_sqkm[3] <- st_area(st_read('data/01589300__19.4257695954962_km__122.427elevation_m__run_3.shp'))
+## segs_hr_calc$ws_area_sqkm[4] <- st_area(st_read('data/01589300__25.5359735468933_km__112.353076923077elevation_m__run_4.shp'))
+## segs_hr_calc$ws_area_sqkm <- segs_hr_calc$ws_area_sqkm/1000
+
+
+ggplot(segs_hr_calc) +
+  geom_point(aes(x = ws_area_sqkm, y = gradient_log10, col = elevation), size = 2.75) +
+  ggtitle(paste('Gradient by Watershed Area (sqkm) at', site_name, 'Log10 Scaled'),
+          subtitle = paste("USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
