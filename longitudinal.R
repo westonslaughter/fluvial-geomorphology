@@ -50,13 +50,13 @@ hgsite_list <- list(featureSource = "comid",
 # get upstream flowlines
 hgsite_us_flowlines <- navigate_nldi(nldi_feature = hgsite_list,
                                    mode = "UT",
-                                   distance = 100,
+                                   distance = 200,
                                    data_source = "")
 
 # get downstream mainstem only (from our starting segment):
 hgsite_ds_flowlines <- navigate_nldi(nldi_feature = hgsite_list,
                                    mode = "DM", 
-                                   distance_km = 0,
+                                   distance_km = 250,
                                    data_source = "")
 
 
@@ -92,17 +92,17 @@ prettymapr::prettymap({
 # find upstream gages
 hgsite_us_gages <- navigate_nldi(hgsite_list,
                                mode = "UT",
+                               distance_km = 150,
                                data_source = "nwissite")
 
-# get downstream everything from our only upstream gage (Happy Isles)
+# get downstream everything from our only upstream gage
 usgs_point <- list(featureSource="nwissite", featureID = "USGS-11264500")
 
-# find all downstream gages on the mainstem river (Hgriver/San Joaquin)
+# find all downstream gages on the mainstem river
 hgsite_ds_gages <- navigate_nldi(hgsite_list,
                                mode = "DM",
-                               #distance_km = 50,
-                               data_source = "nwissite",
-)
+                               distance_km = 150,
+                               data_source = "nwissite")
 
 # let's add these data to our geopackage as well
 # remember it's best to have everything in the same projection
@@ -122,7 +122,7 @@ st_write(hgsite_ds_gages$DM_nwissite, dsn=paste0(here::here(),"/data/hgsite_nhdp
 st_layers(paste0(here::here(), "/data/hgsite_nhdplus.gpkg"))
 
 m1 <- mapview(hgsite, col.regions="black", cex=6, layer.name="Start Point") +
-  mapview(hgsite_streams, zcol="streamorde", legend=TRUE, layer.name="Stream <br> Order") +
+  mapview(hgsite_streams, zcol="slope", legend=TRUE, layer.name="Reach <br> Slope") +
   mapview(hgsite_us_gages, col.regions="orange", layer.name="U/S Gage") +
   mapview(hgsite_ds_gages, col.regions="maroon", layer.name="D/S Gages")
 
@@ -135,7 +135,8 @@ hgriver_us_gage <- st_transform(hgsite_us_gages$UT_nwissite, 26910)
 
 # get the most downstream gage (find ID using mapview map)
 hgriver_ds_gage <- hgsite_ds_gages$DM_nwissite %>%
-  filter(identifier=="USGS-01589350") %>% st_transform(26910)
+  filter(identifier=="USGS-01589352") %>%
+  st_transform(26910)
 
 # calculate the max euclidean (straight line) distance in meters
 max_gage_dist <- st_nn(hgriver_ds_gage, hgriver_us_gage,
@@ -246,7 +247,8 @@ segs_filt_dist <- segs_filt %>%
 
 
 mapview(segs_filt_dist, zcol="total_len_km", layer.name="Cumulative Flowline<br> Distance (km)")  +
-  mapview(poi_snapped, zcol="identifier", layer.name="USGS Gages")
+  mapview(gages_snapped, zcol="identifier", layer.name="USGS Gages") +
+  mapview(poi_snapped, zcol="identifier", layer.name="POI Gage")
 
 ############ Elvation ################
 
@@ -289,9 +291,16 @@ segs_hr_calc <- segs_hr %>%
     mutate(
       elevation_change = c(diff(elevation), NA),
       longitudinal_km_change = c(diff(longitudinal_km), NA),
-      gradient = elevation/longitudinal_km_change,
-      gradient_log10 = log10(gradient)
-    )
+      gradient = elevation_change/longitudinal_km_change,
+      gradient_log10 = log10(gradient * -1)
+    ) %>%
+    filter(!is.na(gradient))
+
+
+mapview(segs_filt_dist, zcol="total_len_km", layer.name="Cumulative Flowline<br> Distance (km)")  +
+  mapview(segs_hr_calc$xy_geom, zcol="identifier", layer.name="Gages") +
+  mapview(gages_snapped, zcol="identifier", layer.name="USGS Gages") +
+  mapview(poi_snapped, zcol="identifier", layer.name="POI Gage")
 
 # plot D by E
 ggplot(segs_hr_calc) +
@@ -307,9 +316,10 @@ ggplot(segs_hr_calc) +
 # plot gradient
 ggplot(segs_hr_calc) +
   geom_point(aes(x = longitudinal_km, y = gradient_log10, col = elevation), size = 2.75) +
-  ggtitle(paste('Gradient (log10) Along Flowpath (km) at', site_name),
+  ggtitle(paste('Gradient (dE/dL) Along Flowpath (km) at', site_name),
           subtitle = paste("USGS", site_info$site_no)) +
   scale_color_viridis() +
+  ## scale_x_log10() +
   theme_minimal() +
   theme(
     text = element_text(size = 26)
@@ -342,11 +352,12 @@ drainage_area_gage <- site_info$drain_area_va * 2.59
 
 # looping multiple 'sheds
 segs_hr_calc <- segs_hr %>%
-    group_by(as.character(round(total_len_km, 0))) %>%
+    arrange(total_len_km) %>%
+  group_by(as.character(round(total_len_km, 0))) %>%
     summarize(
       elevation = mean(elevation),
       longitudinal_km = mean(total_len_km)
-    ) %>%
+    ) %>% arrange(longitudinal_km) %>%
     mutate(
       elevation_change = elevation - lag(elevation),
       longitudinal_km_change = longitudinal_km - lag(longitudinal_km),
@@ -356,13 +367,17 @@ segs_hr_calc <- segs_hr %>%
       longitudinal_km_change = case_when(
         is.na(longitudinal_km_change) ~ min(longitudinal_km), .default = longitudinal_km_change
       ),
-      gradient = elevation/longitudinal_km_change,
-      gradient_log10 = log10(gradient)
+      longitudinal_km = case_when(
+        longitudinal_km < 0.01 ~ NA, .default = longitudinal_km
+      ),
+      gradient = elevation_change/longitudinal_km_change,
+      gradient_log10 = log10(gradient * -1)
     ) %>%
   mutate(
     xy_geom = lwgeom::st_endpoint(geom),
     xy = st_coordinates(lwgeom::st_endpoint(geom)),
-  )
+  ) %>%
+  filter(!is.na(gradient), !is.na(longitudinal_km))
 
 for(i in 1:nrow(segs_hr_calc)) {
 
@@ -412,15 +427,57 @@ mapview('data/01589300__16.5365323742472_km__125.906666666667elevation_m__run_8.
 
 mapview('data/01589300__19.5097197625904_km__121.12elevation_m__run_11.shp')
 
+mapview('data/01589300__9.17126910700478_km__151.305elevation_m__run_23.shp')
+
 ## segs_hr_calc$ws_area_sqkm[1] <- st_area(st_read('data/01589300__2.58323836796896_km__186.524elevation_m__run_1.shp'))
 ## segs_hr_calc$ws_area_sqkm[2] <- st_area(st_read('data/01589300__11.4809465017262_km__141.866885245902elevation_m__run_2.shp'))
 ## segs_hr_calc$ws_area_sqkm[3] <- st_area(st_read('data/01589300__19.4257695954962_km__122.427elevation_m__run_3.shp'))
 ## segs_hr_calc$ws_area_sqkm[4] <- st_area(st_read('data/01589300__25.5359735468933_km__112.353076923077elevation_m__run_4.shp'))
 ## segs_hr_calc$ws_area_sqkm <- segs_hr_calc$ws_area_sqkm/1000
 
+for(i in list.files('data/')) {
+  if(grepl('.shp', i)) {
 
-ggplot(segs_hr_calc) +
-  geom_point(aes(x = ws_area_sqkm, y = gradient_log10, col = elevation), size = 2.75) +
+    this_ws <- sf::read_sf(file.path('data/', i))
+
+    if(!exists("watersheds_df")) {
+        watersheds_df <- this_ws
+    } else {
+        watersheds_df <- rbind(watersheds_df, this_ws)
+    }
+  }
+}
+
+watersheds_df.f <- watersheds_df %>%
+  st_intersection(st_transform(segs_hr_calc, 4326))
+
+watersheds_df.f <- watersheds_df.f %>% distinct()
+
+watersheds_df.m <- watersheds_df.f %>%
+  group_by(as.character(area)) %>%
+  summarize(
+    longitudinal_km = max(longitudinal_km),
+    area = mean(area),
+    elevation = mean(elevation),
+    longitudinal_km_change = mean(longitudinal_km_change),
+    elevation_change = mean(elevation_change),
+    gradient = mean(gradient)*-1,
+    gradient_log10 = log10(gradient)
+  ) %>%
+  group_by(longitudinal_km) %>%
+  summarize(
+    long = max(longitudinal_km),
+    area = mean(area),
+    elevation = mean(elevation),
+    longitudinal_km_change = mean(longitudinal_km_change),
+    elevation_change = mean(elevation_change),
+    gradient = mean(gradient),
+    gradient_log10 = log10(gradient*1),
+    ws_area_sqkm = area/1000
+  )
+
+ggplot(watersheds_df.m) +
+  geom_point(aes(x = log10(longitudinal_km), y = gradient_log10, col = elevation), size = 2.75) +
   ggtitle(paste('Gradient by Watershed Area (sqkm) at', site_name, 'Log10 Scaled'),
           subtitle = paste("USGS", site_info$site_no)) +
   scale_color_viridis() +
@@ -428,3 +485,325 @@ ggplot(segs_hr_calc) +
   theme(
     text = element_text(size = 26)
   )
+
+
+ggplot(watersheds_df.m) +
+  geom_point(aes(x = longitudinal_km, y = gradient, col = elevation), size = 2.75) +
+  ggtitle(paste('Gradient (dE/dL, m/km) by Distance Downstream (sqkm)'),
+          subtitle = paste("Flowpath to USGS", site_info$site_no, site_name)) +
+  scale_color_viridis() +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
+
+library(ggpmisc)
+
+ggplot(watersheds_df.m, aes(x = log10(ws_area_sqkm), y = gradient_log10)) +
+  geom_point(aes(col = elevation), size = 2.75) +
+  ggpmisc::stat_poly_line() +
+  ggpmisc::stat_poly_eq(use_label(c("eq", "R2")), size = 10, label.x = 0.8) +
+  ggtitle(paste('Gradient by Watershed Area (sqkm) at', site_name, 'Log10 Scaled'),
+          subtitle = paste("USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
+
+
+# calculating local channel gradient
+dE = max(watersheds_df.m$elevation) - min(watersheds_df.m$elevation)
+
+dL = max(watersheds_df.m$longitudinal_km) - min(watersheds_df.m$longitudinal_km)
+
+c0 = -0.113
+lS = 0.70
+
+
+ws.df <- watersheds_df.m %>%
+  mutate(
+    Ksn = (elevation/longitudinal_km)/(ws_area_sqkm**c0)
+  )
+
+
+ggplot(ws.df, aes(x = longitudinal_km, y = Ksn)) +
+  geom_point(aes(col = elevation), size = 2.75) +
+  ggpmisc::stat_poly_line() +
+  ggpmisc::stat_poly_eq(use_label(c("eq", "R2")), size = 10, label.x = 0.8) +
+  ggtitle(paste('Local Steepness Index (Ksn) by Distance Downstream'),
+          subtitle = paste(site_name, "   ", "USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
+
+
+
+####### Stream Power #############
+
+# get all USGS gauges in basin
+# NOTE: remember, we pulled all the gauges in our basin previously, and
+# can acees as:
+nrow(gages_snapped)
+
+site_codes <- stringr::str_replace_all(gages_snapped$identifier, 'USGS-', '')
+
+## Data from "peak flow" USGS data
+## ws_site_data <- dataRetrieval::readNWISpeak(siteNumbers = c(site_codes, "01589352"))
+
+ws_site_data <- dataRetrieval::readNWISpeak(siteNumbers = c(site_codes, "01589352", "01589240", "01589200", "01589180"))
+
+ws_peak_data <- ws_site_data %>%
+  filter(
+      peak_va < 15000,
+      !is.na(peak_va)
+  ) %>%
+  mutate(
+      year = lubridate::year(peak_dateTime),
+      decade = year - (year %% 10),
+      half_decade = case_when(year <= (decade + 5) ~ decade,
+                              year > (decade + 5) ~ decade + 5)
+    )
+
+# A) Rating Curve for Peak Flows
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+gg.station.coef <- ggplot(ws_peak_data,
+                aes(
+                  x = log10(peak_va),
+                  y = log10(gage_ht),
+                  color = site_no)
+                ) +
+        geom_point() +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.85,
+                     ) +
+  facet_wrap(~site_no) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) #+
+  ## scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) #+
+  ## ggtitle(title,
+  ##         subtitle = subtitle)
+gg.station.coef
+
+# B) Weibull "recurrence interval"
+ws_peak_sum <- ws_peak_data %>%
+  group_by(site_no) %>%
+  summarize(
+    years_record = length(unique(as.character(year)))
+  )
+
+ws_ri <- ws_peak_data %>%
+  group_by(site_no) %>%
+  arrange(peak_va) %>%
+  mutate(
+    rank = rank(-peak_va),
+    n = ws_peak_sum[ws_peak_sum$site_no == unique(site_no),]$years_record,
+    recurrence_interval = (n + 1)/rank,
+    peak_va = peak_va
+  )
+
+
+gg.station.coef <- ggplot(ws_ri,
+                aes(
+                  x = recurrence_interval,
+                  y = peak_va,
+                  color = site_no)
+                ) +
+        geom_point() +
+        ## stat_poly_line() +
+        ## stat_poly_eq(use_label(c("eq", "R2", "p")),
+        ##              size = 10,
+        ##              label.y = 0.85,
+        ##              ) +
+  facet_wrap(~site_no) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) #+
+  ## scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) #+
+  ## ggtitle(title,
+  ##         subtitle = subtitle)
+gg.station.coef
+
+# get observations cloests to 1.5 yr recurrence interval
+ws_ri_sum <- ws_ri %>%
+  group_by(site_no) %>%
+  slice(which.min(abs(1.5 - recurrence_interval)))
+
+for(i in 1:nrow(ws_ri_sum)) {
+    site <- ws_ri_sum[i,]$site_no
+    wsRI <- ws_ri_sum[i,]$recurrence_interval
+    wsQ <- ws_ri_sum[i,]$peak_va
+
+    print(paste(site, '--', '1.5 year recurrence interval flow:', wsQ))
+}
+
+# data from field measurements
+ws_meas_data <- dataRetrieval::readNWISmeas(
+                                 siteNumbers = c(site_codes, "01589352", "01589240", "01589200", "01589180"),
+                                 expanded = TRUE)
+
+ws_meas <- ws_meas_data %>%
+  filter(
+      ## discharge_va < 15000,
+      !is.na(discharge_va)
+  ) %>%
+  mutate(
+      year = lubridate::year(measurement_dateTime),
+      decade = year - (year %% 10),
+      half_decade = case_when(year <= (decade + 5) ~ decade,
+                              year > (decade + 5) ~ decade + 5),
+    ) %>%
+  group_by(site_no) %>%
+  filter(
+    n_distinct(measurement_dateTime) > 10,
+    ## year > 1980
+  )
+
+# A) Rating Curve for Peak Flows
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+gg.station.coef <- ggplot(ws_meas,
+                aes(
+                  x = log10(discharge_va),
+                  y = log10(gage_height_va),
+                  color = site_no)
+                ) +
+        geom_point() +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.85,
+                     ) +
+  facet_wrap(~site_no) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) #+
+  ## scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) #+
+  ## ggtitle(title,
+  ##         subtitle = subtitle)
+gg.station.coef
+
+
+ws_site_info <- dataRetrieval::readNWISsite(siteNumbers = unique(ws_meas$site_no))
+
+bankfull_discharge <- c(121, 1360, 4400, 725, 2850, 5680)
+
+
+gage_slope_estimate <- c(4, 5.5, 4.4, 3.7, 3.5, 3.4)
+
+ws_site_info <- ws_site_info %>% filter(site_no != "01589295")
+
+ws_site_info <- ws_site_info %>% cbind(ws_bankfulls)
+
+ws_site_info <- ws_site_info %>% cbind(gage_slope_estimate)
+
+
+gg.station.coef <- ggplot(ws_site_info,
+                aes(
+                  x = log10(drain_area_va),
+                  y = log10(ws_bankfulls),
+                  ## color = site_no
+                )
+                ) +
+        geom_point() +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     ## label.y = 0.15,
+                     ) +
+  ## facet_wrap(~site_no) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) #+
+  ## scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) #+
+  ## ggtitle(title,
+  ##         subtitle = subtitle)
+gg.station.coef
+
+
+# HG at 1.5 year flow
+ws_ri_meas <- ws_meas %>%
+  group_by(site_no) %>%
+  filter(!is.na(chan_width)) %>%
+  slice(
+    which.min(abs(ws_site_info[ws_site_info$site_no == unique(site_no),]$ws_bankfull - discharge_va))
+  )
+
+ws_bf_df <- ws_ri_meas %>%
+  merge(ws_site_info, by = "site_no")
+
+# stream power
+hg.pgQs <- function(discharge,
+                    channel_velocity,
+                    channel_width,
+                    channel_area,
+                    slope,
+                    acceleration = 9.814,
+                    mass = 1000,
+                    convert = TRUE) {
+
+    # depth method 1
+    channel_depth = channel_area / channel_width
+    # depth method 2
+    # channel_depth = discharge / (channel_velocity * channel_width)
+
+    if(convert) {
+        # cfs to lps
+        discharge <- discharge *  0.0283168
+        # f/s to m/s
+        channel_veloctiy <- channel_velocity * 0.3048
+        # ft to m
+        channel_depth = channel_depth * 0.3408
+
+    }
+
+    momentum = discharge * mass
+
+    # pgQs
+    pgQs = momentum * acceleration * channel_depth * (slope/1000)
+
+    return(pgQs)
+}
+
+ws_meas_pow <- ws_bf_df %>%
+  mutate(
+    pgQs = hg.pgQs(discharge = ws_bankfulls,
+                   channel_velocity = chan_velocity,
+                   channel_width = chan_width,
+                   channel_area = chan_area,
+                   slope = gage_slope_estimate,
+                   ))
+
+gg.station.coef <- ggplot(ws_meas_pow,
+                aes(
+                  x = drain_area_va,
+                  y = pgQs,
+                  ## color = site_no
+                )
+                ) +
+        geom_point() +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     ## label.y = 0.15,
+                     ) +
+  ## facet_wrap(~site_no) +
+  ## scale_x_log10() +
+  ## scale_y_log10() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) #+
+  ## scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) #+
+  ## ggtitle(title,
+  ##         subtitle = subtitle)
+gg.station.coef
