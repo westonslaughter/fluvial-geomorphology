@@ -471,13 +471,13 @@ watersheds_df.m <- watersheds_df.f %>%
     elevation = mean(elevation),
     longitudinal_km_change = mean(longitudinal_km_change),
     elevation_change = mean(elevation_change),
-    gradient = mean(gradient),
+    gradient = mean(gradient)/1000,
     gradient_log10 = log10(gradient*1),
-    ws_area_sqkm = area/1000
+    ws_area_sqkm = area/100
   )
 
 ggplot(watersheds_df.m) +
-  geom_point(aes(x = log10(longitudinal_km), y = gradient_log10, col = elevation), size = 2.75) +
+  geom_point(aes(x = ws_area_sqkm, y = gradient, col = elevation), size = 2.75) +
   ggtitle(paste('Gradient by Watershed Area (sqkm) at', site_name, 'Log10 Scaled'),
           subtitle = paste("USGS", site_info$site_no)) +
   scale_color_viridis() +
@@ -499,7 +499,7 @@ ggplot(watersheds_df.m) +
 
 library(ggpmisc)
 
-ggplot(watersheds_df.m, aes(x = log10(ws_area_sqkm), y = gradient_log10)) +
+ggplot(watersheds_df.m, aes(x = log10(ws_area_sqkm), y = log10(gradient))) +
   geom_point(aes(col = elevation), size = 2.75) +
   ggpmisc::stat_poly_line() +
   ggpmisc::stat_poly_eq(use_label(c("eq", "R2")), size = 10, label.x = 0.8) +
@@ -513,12 +513,13 @@ ggplot(watersheds_df.m, aes(x = log10(ws_area_sqkm), y = gradient_log10)) +
 
 
 # calculating local channel gradient
+## NOTE: preferable calculate ocncavity before, during, and after knickpoint
 dE = max(watersheds_df.m$elevation) - min(watersheds_df.m$elevation)
 
 dL = max(watersheds_df.m$longitudinal_km) - min(watersheds_df.m$longitudinal_km)
 
 c0 = -0.113
-lS = 0.70
+lS = -2.19
 
 
 ws.df <- watersheds_df.m %>%
@@ -672,7 +673,7 @@ colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E9
 gg.station.coef <- ggplot(ws_meas,
                 aes(
                   x = log10(discharge_va),
-                  y = log10(gage_height_va),
+                  y = log10(),
                   color = site_no)
                 ) +
         geom_point() +
