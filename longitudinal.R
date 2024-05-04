@@ -23,9 +23,9 @@ library(lwgeom)
 library(elevatr)
 library(rgeos)
 
-poi_usgs_id <- "USGS-01589300"
-poi_usgs_id_trim <- "01589300"
+poi_usgs_id <- "USGS-01589352" # "USGS-01589300"
 
+poi_usgs_id_trim <- "01589352" # "01589300"
 site_info <- dataRetrieval::readNWISsite(poi_usgs_id_trim)
 
 site_name <- site_info$station_nm
@@ -61,7 +61,6 @@ hgsite_ds_flowlines <- navigate_nldi(nldi_feature = hgsite_list,
 
 
 # make a list of all the comids we've identified:
-# all_comids <- c(hgsite_us_flowlines$UT_flowlines$nhdplus_comid, hgsite_ds_flowlines$DM_flowlines$nhdplus_comid)
 all_comids <- c(hgsite_us_flowlines$UT_flowlines$nhdplus_comid)
 
 # download all data and create a geopackage with the comid list
@@ -145,36 +144,6 @@ max_gage_dist <- st_nn(hgriver_ds_gage, hgriver_us_gage,
 # now convert this measurement to km
 measurements::conv_unit(max_gage_dist$dist[[1]], "m", "km")
 
-# sna[p to streamline]
-st_snap_points <- function(x, y, namevar, max_dist = 1000) {
-  
-  # this evaluates the length of the data
-  if (inherits(x, "sf")) n = nrow(x)
-  if (inherits(x, "sfc")) n = length(x)
-  
-  # this part: 
-  # 1. loops through every piece of data (every point)
-  # 2. snaps a point to the nearest line geometries
-  # 3. calculates the distance from point to line geometries
-  # 4. retains only the shortest distances and generates a point at that intersection
-  out = do.call(c,
-                lapply(seq(n), function(i) {
-                  nrst = st_nearest_points(st_geometry(x)[i], y)
-                  nrst_len = st_length(nrst)
-                  nrst_mn = which.min(nrst_len)
-                  if (as.vector(nrst_len[nrst_mn]) > max_dist) return(st_geometry(x)[i])
-                  return(st_cast(nrst[nrst_mn], "POINT")[2])
-                })
-  )
-  # this part converts the data to a dataframe and adds a named column of your choice
-  out_xy <- st_coordinates(out) %>% as.data.frame()
-  out_xy <- out_xy %>% 
-    mutate({{namevar}} := x[[namevar]]) %>% 
-    st_as_sf(coords=c("X","Y"), crs=st_crs(x), remove=FALSE)
-  
-  return(out_xy)
-}
-
 # first lets merge all our gages into one dataframe. Make sure in same crs
 st_crs(hgsite_us_gages$UT_nwissite) == st_crs(hgsite_ds_gages$DM_nwissite)
 
@@ -194,6 +163,37 @@ all_gages %>% distinct(identifier) %>% nrow()
 all_gages_proj <- st_transform(all_gages, crs = 26910)
 hgsite_streams_proj <- st_transform(hgsite_streams, crs=26910)
 hgsite_proj <- st_transform(hgsite, crs=26910)
+
+# snap to streamline
+st_snap_points <- function(x, y, namevar, max_dist = 1000) {
+
+  # this evaluates the length of the data
+  if (inherits(x, "sf")) n = nrow(x)
+  if (inherits(x, "sfc")) n = length(x)
+
+  # this part:
+  # 1. loops through every piece of data (every point)
+  # 2. snaps a point to the nearest line geometries
+  # 3. calculates the distance from point to line geometries
+  # 4. retains only the shortest distances and generates a point at that intersection
+  out = do.call(c,
+                lapply(seq(n), function(i) {
+                  nrst = st_nearest_points(st_geometry(x)[i], y)
+                  nrst_len = st_length(nrst)
+                  nrst_mn = which.min(nrst_len)
+                  if (as.vector(nrst_len[nrst_mn]) > max_dist) return(st_geometry(x)[i])
+                  return(st_cast(nrst[nrst_mn], "POINT")[2])
+                })
+  )
+  # this part converts the data to a dataframe and adds a named column of your choice
+  out_xy <- st_coordinates(out) %>% as.data.frame()
+  out_xy <- out_xy %>%
+    mutate({{namevar}} := x[[namevar]]) %>%
+    st_as_sf(coords=c("X","Y"), crs=st_crs(x), remove=FALSE)
+
+  return(out_xy)
+}
+
 
 # now snap points to the lines using a 500 meter buffer, select which ID column you want keep for rejoining
 gages_snapped <- st_snap_points(all_gages_proj, 
@@ -227,8 +227,8 @@ mapview(segs)
 # filter, if desired
 segs_filt <- segs %>%
   filter(
-      gnis_name %in% c("Gwynns Falls"),
-      rowid != 18
+      ## gnis_name %in% c("Gwynns Falls"),
+      ## rowid != 18
     )
 
 mapview(segs_filt, zcol="gnis_name")  + 
@@ -353,7 +353,7 @@ drainage_area_gage <- site_info$drain_area_va * 2.59
 # looping multiple 'sheds
 segs_hr_calc <- segs_hr %>%
     arrange(total_len_km) %>%
-  group_by(as.character(round(total_len_km, 0))) %>%
+    group_by(total_len_km) %>%
     summarize(
       elevation = mean(elevation),
       longitudinal_km = mean(total_len_km)
@@ -384,7 +384,7 @@ for(i in 1:nrow(segs_hr_calc)) {
     i_km = segs_hr_calc$longitudinal_km[i]
     i_elevation = segs_hr_calc$elevation[i]
 
-    s = st_as_sf(d, coords=c("lonfix","latfix"), crs=26910)
+    ## s = st_as_sf(d, coords=c("lonfix","latfix"), crs=26910)
     strans = st_transform(segs_hr_calc$xy_geom, 4326)
 
     strans_xy <- st_coordinates(strans)
@@ -412,6 +412,10 @@ for(i in 1:nrow(segs_hr_calc)) {
 
    segs_hr_calc$ws_area_sqkm[i] <- out$watershed_area_ha/100
 }
+
+
+mapview('data/01589352__0.665020996763221_km__199.88elevation_m__run_1.shp')
+
 
 mapview('data/01589300__2.58323836796896_km__186.524elevation_m__run_1.shp')
 
@@ -454,16 +458,17 @@ watersheds_df.f <- watersheds_df %>%
 watersheds_df.f <- watersheds_df.f %>% distinct()
 
 watersheds_df.m <- watersheds_df.f %>%
-  group_by(as.character(area)) %>%
-  summarize(
-    longitudinal_km = max(longitudinal_km),
-    area = mean(area),
-    elevation = mean(elevation),
-    longitudinal_km_change = mean(longitudinal_km_change),
-    elevation_change = mean(elevation_change),
-    gradient = mean(gradient)*-1,
-    gradient_log10 = log10(gradient)
-  ) %>%
+  mutate(gradient = gradient *-1) %>%
+  ## group_by(as.character(area)) %>%
+  ## summarize(
+  ##   longitudinal_km = max(longitudinal_km),
+  ##   area = mean(area),
+  ##   elevation = mean(elevation),
+  ##   longitudinal_km_change = mean(longitudinal_km_change),
+  ##   elevation_change = mean(elevation_change),
+  ##   gradient = mean(gradient)*-1,
+  ##   gradient_log10 = log10(gradient)
+  ## ) %>%
   group_by(longitudinal_km) %>%
   summarize(
     long = max(longitudinal_km),
@@ -472,9 +477,10 @@ watersheds_df.m <- watersheds_df.f %>%
     longitudinal_km_change = mean(longitudinal_km_change),
     elevation_change = mean(elevation_change),
     gradient = mean(gradient)/1000,
-    gradient_log10 = log10(gradient*1),
+    gradient_log10 = log10(gradient),
     ws_area_sqkm = area/100
-  )
+  ) %>%
+  filter(longitudinal_km_change > 0)
 
 ggplot(watersheds_df.m) +
   geom_point(aes(x = ws_area_sqkm, y = gradient, col = elevation), size = 2.75) +

@@ -34,7 +34,9 @@ siteAll <- c(
 
 # looping through all sites
 for(i in 1:length(siteAll)) {
-    siteNo = siteAll[i]
+
+
+siteNo = siteAll[i]
 
 
 ## site_metadata <- whatNWISdata(siteNo, service = "sv")
