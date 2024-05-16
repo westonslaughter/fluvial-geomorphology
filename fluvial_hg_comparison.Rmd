@@ -1,0 +1,218 @@
+# Fluvial Hydraulic Geoemtry
+
+script to retrieve and explore hydraulic goemetry data from Mid-Atlantic USGS stations
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(ggpmisc)
+library(ggpubr)
+library(plotly)
+library(dataRetrieval)
+library(nhdplusTools) # USGS/NHD rivers data
+library(sf)
+library(mapview) # html mapping
+library(leaflet) # html mapping
+library(leaflet.extras)
+library(here) # setting directories safely
+library(viridis) # color scheme
+library(USAboundaries) # county/state boundaries
+# further geospatial tools
+library(nngeo)
+library(measurements)
+library(lwgeom)
+library(elevatr)
+library(rgeos)
+
+```
+
+```{r}
+
+siteAll <- c(
+            ## # Jones Falls
+            "01589440",
+            ## # Rock Creek
+            "01648000",
+            ## # Seneca Creek
+            "01645000",
+            ## # Bennett Creek
+            "01643500",
+            # Gwynns Falls, Villanova
+            "01589300",
+            # Dead Run
+            "01589330",
+            # Pennypack Creek at Horsham, PA 
+            "01467031",
+            # Pennypack Creek at Rhawn,PA
+            "01467048",
+            # Baisman Run, MD
+            "01583580",
+            # Soper Branc
+            "01643395",
+            # NWB at Norwood
+            "01650050"
+)
+
+for(i in 1:length(siteAll)) {
+
+    # for now,
+    i = 1
+    siteNo = siteAll[i]
+    
+    # query site availability of discarge data
+    siteDataAvailable <- whatNWISdata(
+      siteNumber = siteNo,
+      service = "sv",
+      statCd = "00060"
+    )
+    
+    # query site info
+    site_info <- dataRetrieval::readNWISsite(siteNo)
+    site_name <- site_info$station_nm
+    drainage_area_gage <- site_info$drain_area_va
+    poi <- c(site_info$dec_long_va, site_info$dec_lat_va)
+    
+    # create a point from decimal long/lat
+    hgsite <- st_sfc(st_point(poi), crs = 4326)
+
+
+    # pull in FIELD MEASUREMENT channel geometry data for target USGS station
+    station.hg <- readNWISmeas(siteNumbers = siteNo,
+                           # parameterCd = pCode,
+                           startDate = start.date,
+                           endDate = end.date,
+                           expanded = TRUE)
+    
+    parameterInfo <- attr(station.hg, "variableInfo")
+    siteInfo <- attr(station.hg, "siteInfo")
+
+}
+
+```
+
+Now, we move into at a statin hydraulic geometry. 
+
+Q = w * d * v
+
+w = aQ<sup>b</sup>
+d = cQ<sup>f</sup>
+v = kQ<sup>m</sup>
+
+Q = aQ<sup>b</sup> * cQ<sup>f</sup> * kQ<sup>m</sup>
+
+b + f + m = 1
+a * c * k = 1
+
+
+```{r}
+
+
+# function which dvelops hydraulic geoemtry equations
+hg.rating <- function(discharge, hg_var, verbose = FALSE, convert = FALSE) {
+
+    if(convert) {
+      # convert CFS to cms
+        discharge <- discharge *  0.0283168
+      # convert ft to m
+        hg_var <- hg_var * 0.3048
+    }
+
+    Q = log10(discharge)
+    hg = log10(hg_var)
+
+    hg[is.infinite(hg)] <- NA
+
+    # linear model of log10 data, of form lm(y ~ x)
+    rating.eq = lm(hg ~ Q)
+
+    a = 10**rating.eq$coefficients[[1]]
+    b = rating.eq$coefficients[[2]]
+    rating.eq.coef_exponent = c(a, b)
+
+    if(verbose == TRUE) {
+        print(rating.eq.coef_exponent)
+    }
+
+    return(rating.eq.coef_exponent)
+}
+
+hg.rating.calc <- function(discharge, a, b, convert = FALSE) {
+
+    if(convert) {
+        discharge <- discharge *  0.0283168
+        hg_var <- hg_var * 0.3048
+    }
+
+    Q = discharge
+
+    hg.calc = a*(Q**b)
+
+    return(hg.calc)
+}
+
+```
+
+
+
+Prepare USGS field measurement data for HG analysis
+
+```{r}
+# run with full timeframe for time series analysis
+# get data start and end dates from USGS record
+start.date <- siteDataAvailable$begin_date # "1980-01-01"
+end.date <- siteDataAvailable$end_date # "2023-12-31"
+
+# pull in FIELD MEASUREMENT channel geometry data for target USGS station
+station.hg <- readNWISmeas(siteNumbers = siteNo,
+                       # parameterCd = pCode,
+                       startDate = start.date,
+                       endDate = end.date,
+                       expanded = TRUE)
+
+# filter and enhance field measurements dataframe
+station.hg.df <- station.hg %>%
+    rename(datetime = measurement_dt) %>%
+    filter(
+      # two measurements at beggining of record (1956, 1957) both major outliers
+      ## lubridate::year(datetime) > 1960,
+      # measurement of Q way higher than all others, mid width, removing
+      discharge_va < 15000,
+      # remove all the measurements labelled "poor", "unspecified",
+      measured_rating_diff  != "Poor",
+      measured_rating_diff  != "Unspecified",
+    ) %>%
+    mutate(
+      # useful time aggregations
+      year = lubridate::year(datetime),
+      decade = year - (year %% 10),
+      half_decade = case_when(year <= (decade + 5) ~ decade,
+                              year > (decade + 5) ~ decade + 5),
+      # convert all HG variables into metric
+      discharge_cms = discharge_va * 0.0283168, # cfs to cms
+      chan_width_m = chan_width * 0.3048,
+      chan_area_sqm = chan_area * 0.092903, # sqft to sqm
+      chan_velocity_ms = chan_velocity * 0.3048,
+      gage_ht_m = gage_height_va * 0.3048,
+      # depth as function of channel area divided by width
+      chan_depth_m = chan_area_sqm / chan_width_m,
+      # continue with conversion 
+      # log10 versios of HG variables
+      chan_discharge_log10 = log10(discharge_cms),
+      chan_width_log10 = log10(chan_width_m),
+      chan_area_log10 = log10(chan_area_sqm),
+      chan_depth_log10 = log10(chan_depth_m),
+      chan_velocity_log10 = log10(chan_velocity_ms),
+      gage_height_va_log10 = log10(gage_ht_m),
+      # apply sn and slope equations
+      chan_sn = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "sn") ,
+      chan_slope = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "slope"),
+      # apply pgdS equation
+      shear_stress = hg.pgds(chan_depth_m, chan_velocity_ms, slope = station_gradient),
+      resistance = hg.resistance(shear_stress, chan_velocity_ms),
+      # grain size
+      grain_size = shear_stress / (729)
+    )
+
+
+```

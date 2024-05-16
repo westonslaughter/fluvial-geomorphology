@@ -1,0 +1,2370 @@
+# Fluvial Project
+
+script to retrieve and explore hydraulic goemetry data from Mid-Atlantic USGS stations
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(ggpmisc)
+library(ggpubr)
+library(plotly)
+
+library(dataRetrieval)
+library(nhdplusTools) # USGS/NHD rivers data
+
+
+
+library(sf)
+library(mapview) # html mapping
+library(leaflet) # html mapping
+library(leaflet.extras)
+library(here) # setting directories safely
+library(viridis) # color scheme
+library(USAboundaries) # county/state boundaries
+# further geospatial tools
+library(nngeo)
+library(measurements)
+library(lwgeom)
+library(elevatr)
+library(rgeos)
+
+```
+
+```{r}
+# Jones Falls
+## siteNo <- c("01589440")
+# Gwynns Falls
+siteNo <- c("01589300")
+# Rock Creek
+## siteNo <- c("01648000")
+# Seneca Creek
+## siteNo <- c("01645000")
+# Bennett Creek
+## siteNo <- c("01643500")
+
+## siteAll <- c(
+##             ## # Jones Falls
+##             ## "01589440",
+##             ## # Rock Creek
+##             ## "01648000",
+##             ## # Seneca Creek
+##             ## "01645000",
+##             ## # Bennett Creek
+##             ## "01643500",
+##             # Gwynns Falls, Villanova
+##             "01589300",
+##             # Dead Run
+##             "01589330",
+##             # Pennypack Creek at Horsham, PA 
+##             "01467031",
+##             # Pennypack Creek at Rhawn,PA
+##             "01467048",
+##             # Baisman Run, MD
+##             "01583580",
+##             # Soper Branc
+##             "01643395",
+##             # NWB at Norwood
+##             "01650050"
+## )
+
+# for now,
+i = 1
+siteNo = siteAll[i]
+
+# query site availability of discarge data
+siteDataAvailable <- whatNWISdata(
+  siteNumber = siteNo,
+  service = "sv",
+  statCd = "00060"
+)
+
+
+# query site info
+site_info <- dataRetrieval::readNWISsite(siteNo)
+site_name <- site_info$station_nm
+drainage_area_gage <- site_info$drain_area_va
+poi <- c(site_info$dec_long_va, site_info$dec_lat_va)
+
+
+
+# create a point from decimal long/lat
+hgsite <- st_sfc(st_point(poi), crs = 4326)
+
+
+```
+
+
+Now, let's delineate the watershed 
+
+
+```{r}
+library(macrosheds)
+
+xy = st_transform(hgsite, 4326)
+
+st_xy <- st_coordinates(xy)
+
+write_dir = 'final/watersheds/'
+write_name = as.character(paste0(site_info$site_no, '_watershed_delin'))
+
+out <- macrosheds::ms_delineate_watershed(
+        lat = st_xy[,2],
+        long = st_xy[,1],
+        crs = 4326,
+        write_dir = write_dir,
+        write_name = write_name,
+        spec_buffer_radius = as.integer(round(drainage_area_gage * 2)),
+        spec_snap_distance_m = 150,
+        spec_snap_method = 'standard',
+        spec_dem_resolution = 10,
+        spec_flat_increment = 0.01,
+        spec_breach_method = 'basic',
+        spec_burn_streams = TRUE,
+        verbose = FALSE,
+        confirm = FALSE
+        )
+
+outfile <- file.path(getwd(), write_dir, paste0(write_name, '.shp'))
+watershed_shp <- sf::read_sf(outfile)
+mapview(watershed_shp)
+
+
+
+```
+
+Now, let's return to the USGS - data. First, let's try and develop a rating curve from annual maximum discharge data
+
+```{r}
+# get data start and end dates from USGS record
+start.date <- siteDataAvailable$begin_date # "1980-01-01"
+end.date <- siteDataAvailable$end_date # "2023-12-31"
+
+# we'll be focusing on the period after 2000
+## start.date <- as.Date("2000-01-01")
+
+# pull in peak flow data
+station.peak = readNWISpeak(siteNumbers = siteNo,
+                            startDate = start.date,
+                            endDate = end.date)
+
+# pull in FIELD MEASUREMENT channel geometry data for target USGS station
+station.hg <- readNWISmeas(siteNumbers = siteNo,
+                       # parameterCd = pCode,
+                       startDate = start.date,
+                       endDate = end.date,
+                       expanded = TRUE)
+
+parameterInfo <- attr(station.hg, "variableInfo")
+siteInfo <- attr(station.hg, "siteInfo")
+
+
+# plotting standards
+title <- paste0("\n", siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nField Measurements ", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+ylab = paste0("\nGage Height (m)\n")
+xlab = paste0("\nDischarge (m^3/s)\n")
+gg.station.rating <- ggplot(station.hg,
+                aes(
+                  y = gage_height_va * 0.3048,
+                  x = discharge_va * 0.0283168)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.rating
+
+
+# Let's try again with the peak flow data -
+# but we will filter the time to after 1980
+# and we will also correct for the gage height elevation difference to the stream bed
+# plotting standards
+title <- paste0("\n", siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nPeak Flow and Stream Depth from Gage Height \n", start.date, " to ", end.date, "\n"
+                   )
+
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("\nGage Ht (m)\n")
+ylab = paste0("\nDischarge (m^3/s)\n")
+gg.station.rating <- ggplot(station.peak,
+                aes(
+                  x = (gage_ht * 0.3048), # + 0.61,
+                  y = peak_va * 0.0283168)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.rating
+
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nField Measurements ", start.date, " to ", end.date
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("Depth (m)")
+ylab = paste0("Discharge (m^3/s)")
+gg.station.rating <- ggplot(station.hg,
+                aes(
+                  x = (chan_area/chan_width) * 0.3048,
+                  y = discharge_va * 0.0283168)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.rating
+
+```
+
+Looks, bad, let's use a more recent date range to get a consistent curve
+
+```{r}
+# Let's try after 2010
+start.date <- as.Date("2010-01-01")
+
+
+# pull in FIELD MEASUREMENT channel geometry data for target USGS station
+station.hg <- readNWISmeas(siteNumbers = siteNo,
+                       # parameterCd = pCode,
+                       startDate = start.date,
+                       endDate = end.date,
+                       expanded = TRUE)
+
+parameterInfo <- attr(station.hg, "variableInfo")
+siteInfo <- attr(station.hg, "siteInfo")
+
+
+# plotting standards
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nField Measurements ", start.date, " to ", end.date
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("Gage Height (m)")
+ylab = paste0("Discharge (m^3/s)")
+gg.station.rating <- ggplot(station.hg,
+                aes(
+                  x = gage_height_va * 0.3048,
+                  y = discharge_va * 0.0283168)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.rating
+
+
+# plotting standards
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("\n", "Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nField Measurements ", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("\nDischarge (m^3/s)\n")
+ylab = paste0("\nDepth (m)\n")
+
+gg.station.rating <- ggplot(station.hg,
+                aes(
+                  x = (discharge_va * 0.0283168),
+                  y = (chan_area/chan_width) * 0.3048
+                )) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+  
+gg.station.rating
+
+
+```
+
+Let's look at just an earlier period
+
+```{r}
+# Let's try after 2010
+start.date <- as.Date("1963-01-01")
+end.date <- as.Date("1974-01-01")
+
+
+# pull in FIELD MEASUREMENT channel geometry data for target USGS station
+station.hg <- readNWISmeas(siteNumbers = siteNo,
+                       # parameterCd = pCode,
+                       startDate = start.date,
+                       endDate = end.date,
+                       expanded = TRUE)
+
+parameterInfo <- attr(station.hg, "variableInfo")
+siteInfo <- attr(station.hg, "siteInfo")
+
+
+# plotting standards
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nField Measurements ", start.date, " to ", end.date
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("Gage Height (m)")
+ylab = paste0("Discharge (m^3/s)")
+gg.station.rating <- ggplot(station.hg,
+                aes(
+                  x = gage_height_va * 0.3048,
+                  y = discharge_va * 0.0283168)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.rating
+
+
+# plotting standards
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("\n", "Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nField Measurements ", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("\nDischarge (m^3/s)\n")
+ylab = paste0("\nDepth (m)\n")
+
+gg.station.rating <- ggplot(station.hg,
+                aes(
+                  x = (discharge_va * 0.0283168),
+                  y = (chan_area/chan_width) * 0.3048
+                )) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+  
+gg.station.rating
+
+
+```
+
+Time series of monthly mean flows?
+
+``` {r}
+# start date back 2010
+start.date <- "1956-01-01"
+
+# pull in daily flow data
+station.q.dv = readNWISdv(siteNumbers = siteNo,
+                          parameterCd = "00060", # discharge pcode
+                          startDate = start.date,
+                            endDate = end.date)
+
+# plotting standards
+title <- paste0("\n",
+                siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nMonthly Average Flow ", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("\nMonth\n")
+ylab = paste0("\nMean Discharge (m^3/s)\n")
+
+# get just "year" form peak flow date
+station.q.dv.sum <- station.q.dv %>%
+  filter(!is.na(X_00060_00003)) %>%
+  mutate(
+    date = Date,
+    year = lubridate::year(date),
+    day = lubridate::yday(date),
+    month = lubridate::month(date),
+    discharge_cms = X_00060_00003 * 0.0283168
+  ) %>%
+  group_by(site_no, month) %>%
+  summarize(
+    discharge_cms = mean(discharge_cms),
+    date = lubridate::month(as.Date(min(date)))
+  ) 
+
+gg.station.q.dv.sum <- ggplot(station.q.dv.sum,
+                aes(
+                  x = as.factor(date),
+                  y = discharge_cms)
+                ) +
+        ## stat_poly_line() +
+        ## stat_poly_eq(use_label(c("eq", "R2", "p")),
+        ##              size = 10,
+        ##              label.y = 0.9
+        ##              ) +
+  geom_point(size = 5) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  ylim(0, 2) +
+  ## xlim(1930, 2020) +
+  ## scale_x_log10() +
+  ## scale_y_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.q.dv.sum
+
+
+```
+
+Let's look at a time series of peak flows
+
+``` {r}
+# start date back to beginning of record
+start.date <- siteDataAvailable$begin_date # "1980-01-01"
+
+# pull in peak flow data
+station.peak = readNWISpeak(siteNumbers = siteNo,
+                            startDate = start.date,
+                            endDate = end.date)
+
+# plotting standards
+title <- paste0("\n", siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+
+subtitle <- paste0("Drainage Area:", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nPeak Annual Flow ", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("\nYear\n")
+ylab = paste0("\nPeak Discharge (m^3/s)\n")
+
+# get just "year" form peak flow date
+station.peak <- station.peak %>%
+  mutate(
+    year = lubridate::year(peak_dt)
+  )
+
+gg.station.peak <- ggplot(station.peak,
+                aes(
+                  x = year,
+                  y = peak_va * 0.3048)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  ## scale_x_log10() +
+  scale_y_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.peak
+
+
+```
+
+Let's look at flood frequency, or reccurence interval.
+
+``` {r}
+
+# get number years of flow record
+station.peak.sum <- station.peak %>%
+  group_by(site_no) %>%
+  summarize(
+    years_record = length(unique(as.character(year)))
+  )
+
+# sort and rank flows
+station.ri <- station.peak %>%
+  arrange(peak_va) %>%
+  mutate(
+    rank = rank(-peak_va),
+    n = station.peak.sum[station.peak.sum$site_no == unique(site_no),]$years_record,
+    recurrence_interval = (n + 1)/rank,
+    peak_va = peak_va
+  )
+
+
+# plotting standards
+title <- paste0("\n", siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nWeibull Recurrence Interval, Annual Peak Flows", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("\nRecurrence Interval\n")
+ylab = paste0("\nDischarge (m^3/s)\n")
+
+
+gg.station.ri <- ggplot(station.ri,
+                aes(
+                  x = recurrence_interval,
+                  y = peak_va * 0.0283168,
+                  ## color = site_no,
+                  )
+                ) +
+        geom_point(size = 3) +
+        ## stat_poly_line() +
+        ## stat_poly_eq(use_label(c("eq", "R2", "p")),
+        ##              size = 10,
+        ##              label.y = 0.85,
+        ##              ) +
+  ## facet_wrap(~site_no) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  geom_vline(xintercept = 1.5, col = 'pink') +
+  geom_vline(xintercept = 2.33, col = 'blue') +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.ri
+
+# inspect to get discharge values
+plotly::ggplotly(gg.station.ri)
+
+# get observations cloests to 1.5 yr recurrence interval
+station.peak.ri <- station.ri %>%
+  group_by(site_no) %>%
+  slice(which.min(abs(1.5 - recurrence_interval)))
+
+station.peak.ri_2.33 <- station.ri %>%
+  group_by(site_no) %>%
+  slice(which.min(abs(2.33 - recurrence_interval)))
+
+for(i in 1:nrow(station.peak.ri)) {
+    site <- station.peak.ri[i,]$site_no
+    wsRI <- station.peak.ri[i,]$recurrence_interval
+    wsQ1.5 <- station.peak.ri[i,]$peak_va
+
+    # bankfull stats from RI 2.33
+    station_Qbf_RI2.33 <- station.peak.ri_2.33[i,]$peak_va
+    station_Stagebf_RI2.33 <- station.peak.ri_2.33[i,]$gage_ht
+
+    print(paste(site, '--', '1.5 year recurrence interval flow:', wsQ1.5))
+    print(paste(site, '--', '2.33 year recurrence interval flow:', station_Qbf_RI2.33))
+}
+
+
+station.peak.ri_100 <- station.ri %>%
+  group_by(site_no) %>%
+  slice(which.min(abs(100 - recurrence_interval)))
+
+# redo plot with predictive function
+gg.station.ri <- ggplot(station.ri,
+                aes(
+                  x = recurrence_interval,
+                  y = peak_va * 0.0283168,
+                  ## color = site_no,
+                  )
+                ) +
+        geom_point() +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.85,
+                     ) +
+  ## facet_wrap(~site_no) +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  ## scale_y_log10() +
+  ## scale_x_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  geom_vline(xintercept = 1.5, col = 'pink') +
+  geom_vline(xintercept = 2.33, col = 'blue') +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.ri
+
+station.ri.eq <- function(x) {
+    y = 1.27*10**3 + x*314
+    
+    return(y)
+}
+
+ri100 = station.ri.eq(100)
+ri1.5 = station.ri.eq(1.5)
+ri2 = station.ri.eq(2)
+ri2.33 = station.ri.eq(2.33)
+ri86 = station.ri.eq(86)
+ri100 = station.ri.eq(100)
+
+print("")
+print(paste0("Recurrence Interval 1.5yr: ", ri1.5 * 0.0283168))
+print(paste0("Recurrence Interval 2.33yr: ", ri2.33 * 0.0283168))
+print(paste0("Recurrence Interval 2yr: ", ri2 * 0.0283168))
+print(paste0("Recurrence Interval 86yr: ", ri86 * 0.0283168))
+print(paste0("Recurrence Interval 100yr: ", ri100 * 0.0283168))
+print(paste0("Ratio Recurrence Interval 1.5yr:100yr: ", ri1.5/ri100))
+print(paste0("Ratio Recurrence Interval 2.33yr:100yr: ", ri2.33/ri100))
+
+
+
+```
+
+Dimensionless rating curve, where peak flow and peak flow depth are normalized by sit bankfull Q
+
+``` {r}
+# get data start and end dates from USGS record
+start.date <- siteDataAvailable$begin_date # "1980-01-01"
+end.date <- siteDataAvailable$end_date # "2023-12-31"
+
+# we'll be focusing on the period after 2000
+start.date <- as.Date("2000-01-01")
+
+# bankfull Q from 2.33yr recurrence interval
+bankfull_discharge_cms = station_Qbf_RI2.33 *  0.0283168
+bankfull_stage_m = station_Stagebf_RI2.33 * 0.3048
+
+# pull in peak flow data, and add Qbf normalized flow and gauge height 
+station.peak = readNWISpeak(siteNumbers = siteNo,
+                            startDate = start.date,
+                            endDate = end.date)
+
+station.peak.dmnls <- station.peak %>%
+  mutate(
+    Q_dmnls = (peak_va * 0.0283168) / bankfull_discharge_cms, 
+    Stage_dmnls = (gage_ht * 0.3048) / bankfull_stage_m 
+  )
+
+# plotting standards
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\n\nDimensionless Annual Peak Flow and Gage Height, 2.33yr RI Bankfull-normalized\n", start.date, " to ", end.date, "\n")
+                   
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("Log10 Gage Height (GH/GHbf)")
+ylab = paste0("Log10 Peak Flow (Q/Qbf)")
+gg.station.rating <- ggplot(station.peak.dmnls,
+                aes(
+                  x = Q_dmnls,
+                  y = Stage_dmnls)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.rating
+
+```
+
+Curious about peak flow gage height
+
+```{r}
+
+# plotting standards
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nPeak Flow and Gage Height", start.date, " to ", end.date, "\n")
+                   
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+# measured rating curve
+xlab = paste0("Gage Height (m)")
+ylab = paste0("Peak Flow (m^3/s)")
+gg.station.peak.rating <- ggplot(station.peak,
+                aes(
+                  x = gage_ht * 0.3048,
+                  y = peak_va * 0.0283168)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9
+                     ) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  xlab(xlab) +
+  ylab(ylab) +
+  ggtitle(title,
+          subtitle = subtitle)
+gg.station.peak.rating
+
+```
+
+
+Now, we move into at a statin hydraulic geometry. 
+
+Q = w * d * v
+
+w = aQ<sup>b</sup>
+d = cQ<sup>f</sup>
+v = kQ<sup>m</sup>
+
+Q = aQ<sup>b</sup> * cQ<sup>f</sup> * kQ<sup>m</sup>
+
+b + f + m = 1
+a * c * k = 1
+
+
+``` {r}
+
+
+# function which dvelops hydraulic geoemtry equations
+hg.rating <- function(discharge, hg_var, verbose = FALSE, convert = FALSE) {
+
+    if(convert) {
+      # convert CFS to cms
+        discharge <- discharge *  0.0283168
+      # convert ft to m
+        hg_var <- hg_var * 0.3048
+    }
+
+    Q = log10(discharge)
+    hg = log10(hg_var)
+
+    hg[is.infinite(hg)] <- NA
+
+    # linear model of log10 data, of form lm(y ~ x)
+    rating.eq = lm(hg ~ Q)
+
+    a = 10**rating.eq$coefficients[[1]]
+    b = rating.eq$coefficients[[2]]
+    rating.eq.coef_exponent = c(a, b)
+
+    if(verbose == TRUE) {
+        print(rating.eq.coef_exponent)
+    }
+
+    return(rating.eq.coef_exponent)
+}
+
+hg.rating.calc <- function(discharge, a, b, convert = FALSE) {
+
+    if(convert) {
+        discharge <- discharge *  0.0283168
+        hg_var <- hg_var * 0.3048
+    }
+
+    Q = discharge
+
+    hg.calc = a*(Q**b)
+
+    return(hg.calc)
+}
+
+# downstream HG
+hg.pgds <- function(hg_depth, # channel depth
+                    hg_velocity, # channel mean velocity
+                    acceleration = 9.814, # gravity
+                    slope = 0.00962855, # slope of channel
+                    p = 1000, # mass density water
+                    convert = FALSE # if inputs in imperial system
+                    ) {
+
+    # tau, t, also "Shear Stress", see Leopold, Wolman, Miller pg 153
+    # t = Force / Channel Boundary Area = pgRS ~ pgdS
+    # p = mass density of water = 1000
+    # g = acceleration due to gravity  = 9.814
+    # R = hydraulic radius ~ depth
+    # S = slope
+
+    if(convert) {
+        discharge <- discharge *  0.0283168
+        hg_var <- hg_var * 0.3048
+    }
+
+    pgds = p * acceleration * hg_depth * slope
+
+    return(pgds)
+}
+
+hg.resistance <- function(pgds, hg_velocity) {
+    resistance = pgds / (hg_velocity**2) # Leopold,W,M pg 157
+    return(resistance)
+}
+
+# resistance and slope by valeoctiy over depth
+#  S**0.5 / n = U/d**0.67
+hg.sn.slope <- function(hg_depth, hg_velocity, n = 0.035, metric = "sn") {
+
+    U = hg_velocity
+    d = hg_depth
+
+    sn = U/(d**0.67)
+    slope = (sn*n)**2 # NOTE: manning coefficient unit conversion issue?
+
+    if(metric == "sn") {
+        return(sn)
+    } else if(metric == "slope"){
+        return(slope)
+    } else {
+        warning("error: invalid metric input, provide either 'sn', 'slope', or no input which will default to sn")
+    }
+    
+}
+
+
+
+```
+
+Prepare USGS field measurement data for HG analysis
+
+``` {r}
+station_gradient = 0.00261
+
+# run with full timeframe for time series analysis
+# get data start and end dates from USGS record
+start.date <- siteDataAvailable$begin_date # "1980-01-01"
+end.date <- siteDataAvailable$end_date # "2023-12-31"
+
+# pull in FIELD MEASUREMENT channel geometry data for target USGS station
+station.hg <- readNWISmeas(siteNumbers = siteNo,
+                       # parameterCd = pCode,
+                       startDate = start.date,
+                       endDate = end.date,
+                       expanded = TRUE)
+
+# filter and enhance field measurements dataframe
+station.hg.df <- station.hg %>%
+    rename(datetime = measurement_dt) %>%
+    filter(
+      # two measurements at beggining of record (1956, 1957) both major outliers
+      ## lubridate::year(datetime) > 1960,
+      # measurement of Q way higher than all others, mid width, removing
+      discharge_va < 15000,
+      # remove all the measurements labelled "poor", "unspecified",
+      measured_rating_diff  != "Poor",
+      measured_rating_diff  != "Unspecified",
+    ) %>%
+    mutate(
+      # useful time aggregations
+      year = lubridate::year(datetime),
+      decade = year - (year %% 10),
+      half_decade = case_when(year <= (decade + 5) ~ decade,
+                              year > (decade + 5) ~ decade + 5),
+      # convert all HG variables into metric
+      discharge_cms = discharge_va * 0.0283168, # cfs to cms
+      chan_width_m = chan_width * 0.3048, # ft to m
+      chan_area_sqm = chan_area * 0.092903, # sqft to sqm
+      chan_velocity_ms = chan_velocity * 0.3048, # ft to m 
+      gage_ht_m = gage_height_va * 0.3048, # ft to m
+      # depth as function of channel area divided by width
+      chan_depth_m = chan_area_sqm / chan_width_m,
+      # continue with conversion 
+      # log10 versios of HG variables
+      chan_discharge_log10 = log10(discharge_cms),
+      chan_width_log10 = log10(chan_width_m),
+      chan_area_log10 = log10(chan_area_sqm),
+      chan_depth_log10 = log10(chan_depth_m),
+      chan_velocity_log10 = log10(chan_velocity_ms),
+      gage_height_va_log10 = log10(gage_ht_m),
+      # apply sn and slope equations
+      chan_sn = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "sn") ,
+      chan_slope = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "slope"),
+      # apply pgdS equation
+      shear_stress = hg.pgds(chan_depth_m, chan_velocity_ms, slope = station_gradient),
+      resistance = hg.resistance(shear_stress, chan_velocity_ms),
+      # grain size
+      grain_size = shear_stress / (729)
+    )
+
+
+```
+
+Apply HG equations to all station data
+
+```{r}
+
+
+# overall rating equations
+print("width:")
+station.w.eq <- hg.rating(discharge = station.hg.df$discharge_cms, hg_var = station.hg.df$chan_width_m, verbose = T)
+
+print("depth:")
+station.d.eq <- hg.rating(discharge = station.hg.df$discharge_cms, hg_var = station.hg.df$chan_depth_m, verbose = T)
+
+print("velocity:")
+station.v.eq <- hg.rating(discharge = station.hg.df$discharge_cms, hg_var = station.hg.df$chan_velocity_ms, verbose = T)
+
+
+# last 10yr rating equations
+station.hg.10yr <- station.hg.df %>%
+  filter(year > 2010)
+
+print("width:")
+station.w.eq <- hg.rating(discharge = station.hg.10yr$discharge_cms, hg_var = station.hg.10yr$chan_width_m, verbose = T)
+
+print("depth:")
+station.d.eq <- hg.rating(discharge = station.hg.10yr$discharge_cms, hg_var = station.hg.10yr$chan_depth_m, verbose = T)
+
+print("velocity:")
+station.v.eq <- hg.rating(discharge = station.hg.10yr$discharge_cms, hg_var = station.hg.10yr$chan_velocity_ms, verbose = T)
+
+```
+
+Apply these coefficients and exponents to the data
+
+```{r}
+# plot all time HG change
+station.hg.calc <- station.hg.df %>%
+  group_by(decade) %>%
+  summarize(
+      hg_exp_w  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_width_m, verbose = F)[[2]],
+      hg_exp_d  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_depth_m, verbose = F)[[2]],
+      hg_exp_v  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_velocity_ms, verbose = F)[[2]],
+      hg_coef_w = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_width_m, verbose = F)[[1]],
+      hg_coef_d = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_depth_m, verbose = F)[[1]],
+      hg_coef_v = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_velocity_ms, verbose = F)[[1]],
+  ) %>%
+  tidyr::pivot_longer(cols = c(
+                           hg_exp_w,
+                           hg_exp_d,
+                           hg_exp_v,
+                           hg_coef_w,
+                           hg_coef_d,
+                           hg_coef_v),
+                      names_to = "var",
+                      values_to = "val")
+
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nHydraulic Geometry ", start.date, " to ", end.date, "\n\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+
+xlab = paste0("Year")
+ylab = paste0("Decade Hydraulic Geometry Equation Value")
+
+gg.station.eq.coef <- ggplot(station.hg.calc,
+                aes(
+                  x = decade,
+                  y = val,
+                  col = var
+                  )
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9 * c(0.75, 0.8, 0.85),
+                     ) +
+  facet_wrap(~var) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  ## ylim(-1.5, 1.5) +
+  xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.eq.coef
+
+station.hg.calc.wide <- tidyr::pivot_wider(station.hg.calc, id_cols = "decade", names_from = "var", values_from = "val")
+
+write.csv(station.hg.calc.wide, 'hg_decades.csv')
+
+
+station.hg.decades <- station.hg.df %>%
+  mutate(
+    decade = case_when(decade == 2020 ~ 2010, TRUE ~ decade)
+  ) %>%
+  group_by(decade) %>%
+  summarize(
+      b  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_width_m, verbose = F)[[2]],
+      f  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_depth_m, verbose = F)[[2]],
+      m  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_velocity_ms, verbose = F)[[2]],
+      a = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_width_m, verbose = F)[[1]],
+      c = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_depth_m, verbose = F)[[1]],
+      k = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_velocity_ms, verbose = F)[[1]],
+  ) %>%
+  mutate(
+      bfm__sum = b+f+m,
+      ack__product = a*c*k,
+      r = f/b,
+    ) %>%
+  tidyr::pivot_longer(cols = c(
+                           b,
+                           f,
+                           m,
+                           a,
+                           c,
+                           k,
+                           bfm__sum,
+                           ack__product,
+                           r
+                      ),
+                      names_to = "var",
+                      values_to = "val")
+
+```
+
+Try doing a "rolling" version
+
+```{r}
+station.hg.eq.df <- station.hg.df
+
+for(i in 1:nrow(station.hg.eq.df)) {
+  if(i < 30) {
+      station.hg.eq.df$hg_exp_w[i] = NA # hg.rating(discharge = station.hg.df[(i-30g):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_width_m, verbose = F)[[2]]
+      station.hg.eq.df$hg_exp_d[i] = NA # hg.rating(discharge = station.hg.df[(i-30g):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_depth_m, verbose = F)[[2]]
+      station.hg.eq.df$hg_exp_v[i] = NA # hg.rating(discharge = station.hg.df[(i-30g):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_velocity_ms, verbose = F)[[2]]
+      station.hg.eq.df$hg_coef_w[i]= NA # hg.rating(discharge = station.hg.df[(i-30g):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_width_m, verbose = F)[[1]]
+      station.hg.eq.df$hg_coef_d[i]= NA # hg.rating(discharge = station.hg.df[(i-30g):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_depth_m, verbose = F)[[1]]
+      station.hg.eq.df$hg_coef_v[i]= NA # hg.rating(discharge = station.hg.df[(i-30g):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_velocity_ms, verbose = F)[[1]]
+  } else if( i > 30) {
+      station.hg.eq.df$hg_exp_w[i] = hg.rating(discharge = station.hg.df[(i-30):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_width_m, verbose = F)[[2]]
+      station.hg.eq.df$hg_exp_d[i] = hg.rating(discharge = station.hg.df[(i-30):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_depth_m, verbose = F)[[2]]
+      station.hg.eq.df$hg_exp_v[i] = hg.rating(discharge = station.hg.df[(i-30):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_velocity_ms, verbose = F)[[2]]
+      station.hg.eq.df$hg_coef_w[i]= hg.rating(discharge = station.hg.df[(i-30):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_width_m, verbose = F)[[1]]
+      station.hg.eq.df$hg_coef_d[i]= hg.rating(discharge = station.hg.df[(i-30):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_depth_m, verbose = F)[[1]]
+      station.hg.eq.df$hg_coef_v[i]= hg.rating(discharge = station.hg.df[(i-30):i,]$discharge_cms, hg_var = station.hg.df[(i-30):i,]$chan_velocity_ms, verbose = F)[[1]]
+  }
+}
+
+
+station.hg.eq.calc <- station.hg.eq.df %>%
+  filter(
+      !is.na(hg_exp_w),
+      !is.na(hg_exp_d),
+      !is.na(hg_exp_v),
+      !is.na(hg_coef_w),
+      !is.na(hg_coef_d),
+      !is.na(hg_coef_v)
+  ) %>%
+  group_by(year) %>%
+  summarize(
+      hg_exp_w  = mean(hg_exp_w),
+      hg_exp_d  = mean(hg_exp_d),
+      hg_exp_v  = mean(hg_exp_v),
+      hg_coef_w = mean(hg_coef_w),
+      hg_coef_d = mean(hg_coef_d),
+      hg_coef_v = mean(hg_coef_v)
+  ) %>%
+  tidyr::pivot_longer(cols = c(
+                           hg_exp_w,
+                           hg_exp_d,
+                           hg_exp_v,
+                           hg_coef_w,
+                           hg_coef_d,
+                           hg_coef_v),
+                      names_to = "hg",
+                      values_to = "val")
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nHydraulic Geometry ", start.date, " to ", end.date, "\n\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+
+xlab = paste0("Year")
+ylab = paste0("30-measurement Rolling Hydraulic Geometry Equation Value")
+
+gg.station.eq.coef <- ggplot(station.hg.eq.calc,
+                aes(
+                  x = year,
+                  y = val,
+                  col = hg
+                  )
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9 * c(0.75, 0.8, 0.85),
+                     ) +
+  facet_wrap(~hg) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  ## ylim(-1.5, 1.5) +
+  xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.eq.coef
+
+```
+
+
+plot
+
+```{r}
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nHydraulic Geometry ", start.date, " to ", end.date, "\n\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+
+xlab = paste0("Year")
+ylab = paste0("Half Decade Hydraulic Geometry Equation Value")
+
+# Science Notes
+# - flood event ticks
+# - NAO index annual ts?
+# - GEE gravel bar ts
+# Figure Notes:
+# - set x-axis to lowest start across sites
+# - set half_decades to always same across sites?
+# - set y axis to lowest/highest log10(val)
+# - set d, w, v to same color (nice color)
+## gg.station.coef <- ggplot(station.hg.calc[grepl('coef', station.hg.calc$var),],
+gg.station.coef <- ggplot(station.hg.calc,
+                aes(
+                  x = half_decade,
+                  y = val,
+                  color = var)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9 * c(0.75, 0.8, 0.85),
+                     ) +
+  facet_wrap(~var) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  ## ylim(-1.5, 1.5) +
+  xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.coef
+
+# sn, slope by discharge, in recent era
+station.hg.df.2010_Now <- station.hg.df %>%
+  filter(year > 2010)
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\n", start.date, " to ", end.date, "\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Slope")
+gg.station.q_slope <- ggplot(station.hg.df.2010_Now,
+                aes(
+                  x = chan_discharge,
+                  y = chan_slope)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.9 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_slope
+
+
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Resistance")
+gg.station.q_resistance <- ggplot(station.hg.df.2010_Now,
+                aes(
+                  x = chan_discharge,
+                  y = resistance)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 0.2 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  ## scale_y_log10() +
+  scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+
+# sn, slope by discharge, in recent era
+start_year <- 2010
+end_year <- 2024
+
+station.hg.df.2010_Now <- station.hg.df %>%
+  filter(
+    year > start_year,
+    year < end_year
+  )
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nSlope to Resistance Relationship by Peak Flows ", start_year, " to ", end_year, "\n"
+                   )
+
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+xlab = paste0("\nDischarge (cms)\n")
+ylab = paste0("\nS^1/2 / n\n")
+gg.station.q_resistance <- ggplot(station.hg.df.2010_Now,
+                aes(
+                  x = chan_discharge,
+                  y = chan_sn)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1.2 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+
+# sn, slope by discharge, in early era
+start_year <- 1979
+end_year <- 1985
+
+station.hg.df.1956_Now <- station.hg.df %>%
+  filter(
+    year > start_year,
+    year < end_year
+  )
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nSlope to Resistance Relationship by Peak Flows ", start_year, " to ", end_year, "\n"
+                   )
+
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+xlab = paste0("\nDischarge (cms)\n")
+ylab = paste0("\nS^1/2 / n\n")
+
+gg.station.q_resistance <- ggplot(station.hg.df.1956_Now,
+                aes(
+                  x = chan_discharge * 0.0283168,
+                  y = chan_sn, text = year)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1.2 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+plotly::ggplotly(gg.station.q_resistance)
+
+# Explore time series of actual geometry values
+station.hg.ts <- station.hg.df %>%
+  group_by(year) %>%
+  summarise(
+    ## chan_width_m = mean(chan_width_m/bankfull_properties$bankfull_width_m),
+    ## chan_depth_m = mean(chan_depth_m/bankfull_properties$bankfull_depth_m),
+    ## chan_velocity_ms = mean(chan_velocity_ms/bankfull_properties$bankfull_velocity_ms),
+    ## discharge_cms = mean(discharge_cms/bankfull_properties$bankfull_flow_closest_measurement_cms)
+    discharge_cms = mean(discharge_cms),
+    chan_width_m = mean(chan_width_m/discharge_cms),
+    chan_depth_m = mean(chan_depth_m/discharge_cms),
+    chan_velocity_ms = mean(chan_velocity_ms/discharge_cms)
+  ) %>% 
+  tidyr::pivot_longer(cols = c(
+                           chan_width_m,
+                           chan_depth_m,
+                           chan_velocity_ms
+                           ## discharge_cms
+                           ),
+                      names_to = "var",
+                      values_to = "val")
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nHydraulic Geometry ", start.date, " to ", end.date, "\n\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+
+xlab = paste0("Year")
+ylab = paste0("Flow Normalized\nChannel Geometry")
+
+# Science Notes
+# - flood event ticks
+# - NAO index annual ts?
+# - GEE gravel bar ts
+# Figure Notes:
+# - set x-axis to lowest start across sites
+# - set half_decades to always same across sites?
+# - set y axis to lowest/highest log10(val)
+# - set d, w, v to same color (nice color)
+## gg.station.coef <- ggplot(station.hg.calc[grepl('coef', station.hg.calc$var),],
+gg.station.coef <- ggplot(station.hg.ts,
+                aes(
+                  x = year,
+                  y = val,
+                  color = var)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1 * c(0.75, 0.8, 0.2),
+                     ) +
+  facet_wrap(~var) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  ## ylim(-1.5, 1.5) +
+  xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.coef
+
+```
+
+Show bankfull station geometry
+
+```{r}
+
+qbf_cms = station_Qbf_RI2.33 * 0.0283168
+
+print(paste(site, '--', '2.33 year recurrence interval flow (cms):', qbf_cms))
+
+# get observations cloests to 1.5 yr recurrence interval
+station.bankfull <- station.hg.df.2010_Now %>%
+  ## filter(year > 2020) %>%
+  group_by(site_no) %>%
+  slice(which.min(abs(qbf_cms - discharge_cms)))
+
+bankfull_properties = list(
+    "bankfull_flow_closest_measurement_cms" = station.bankfull$discharge_cms,
+    "bankfull_depth_m" =        station.bankfull$chan_depth_m,
+    "bankfull_width_m" =        station.bankfull$chan_width_m,
+    "bankfull_velocity_ms" =     station.bankfull$chan_velocity_ms,
+    "bankfull_resistance" =   station.bankfull$resistance,
+    "bankfull_shear_stress" = station.bankfull$shear_stress,
+    "bankfull_slope" =        station.bankfull$chan_slope
+)
+
+print(bankfull_properties)
+
+# also do a version wit the calculated bankfull at 2.33 RI
+# and using the most recent exponents
+
+print(tail(station.hg.eq.df))
+
+
+# get most recent HG coefs and exps
+## station.hg.recent <- station.hg.calc %>%
+##   tail(6)
+
+station.hg.recent <- station.hg.eq.df %>%
+  tail(6)
+
+
+station.hg.w = c(station.hg.recent$hg_exp_w[6], station.hg.recent$hg_coef_w[6])
+station.hg.d = c(station.hg.recent$hg_exp_d[6], station.hg.recent$hg_coef_d[6])
+station.hg.v = c(station.hg.recent$hg_exp_v[6], station.hg.recent$hg_coef_v[6])
+
+## station.hg.w = station.hg.recent[c(1,4),]
+## station.hg.d = station.hg.recent[c(2,5),]
+## station.hg.v = station.hg.recent[c(3,6),]
+
+bf.w <- hg.rating.calc(discharge = 58.61, a  = station.hg.w[2], b = station.hg.w[1], convert = FALSE)
+bf.d <- hg.rating.calc(discharge = 58.61, a  = station.hg.d[2], b = station.hg.d[1], convert = FALSE)
+bf.v <- hg.rating.calc(discharge = 58.61, a  = station.hg.v[2], b = station.hg.v[1], convert = FALSE)
+
+## bf.w <- hg.rating.calc(discharge = 58.61, a  = station.hg.w$val[2], b = station.hg.w$val[1], convert = FALSE)
+## bf.d <- hg.rating.calc(discharge = 58.61, a  = station.hg.d$val[2], b = station.hg.d$val[1], convert = FALSE)
+## bf.v <- hg.rating.calc(discharge = 58.61, a  = station.hg.v$val[2], b = station.hg.v$val[1], convert = FALSE)
+
+print(paste0('bankfull width: ', bf.w, '   '))
+print(paste0('bankfull depth: ', bf.d, '   '))
+print(paste0('bankfull velocity: ', bf.v, '   '))
+
+## station.hg.w$val[1] + station.hg.d$val[1] + station.hg.v$val[1]
+## station.hg.w$val[2] * station.hg.d$val[2] * station.hg.v$val[2]
+
+station.hg.w[1] + station.hg.d[1] + station.hg.v[1]
+station.hg.w[2] * station.hg.d[2] * station.hg.v[2]
+
+start_year <- 2000
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nDepth and Discharge ", start_year, " to ", end.date, "\n\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+
+
+xlab = paste0("Year")
+ylab = paste0("Flow Normalized\nChannel Geometry")
+
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Depth")
+gg.station.q_slope <- ggplot(station.hg.df %>% filter(year > start_year),
+                aes(
+                  x = discharge_cms,
+                  y = chan_depth_m)
+                ) +
+        ## stat_poly_line() +
+        ## stat_poly_eq(use_label(c("eq", "R2", "p")),
+        ##              size = 10,
+        ##              label.y = 0.9 * c(0.75, 0.8, 0.85),
+        ##              ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  ## scale_y_log10() +
+  ## scale_x_log10() +
+  ylim(0, 1.5) +
+  xlim(0, 50) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_slope
+
+
+```
+
+# Part 4: Longitudinal Stream Profile
+
+```{r}
+# now figure out the nearest stream segment ID to our point
+hgsite_comid <- discover_nhdplus_id(hgsite)
+
+# first make a list defining the sourcetype and ID
+hgsite_list <- list(featureSource = "comid",
+                  featureID = hgsite_comid)
+
+# get upstream flowlines
+hgsite_us_flowlines <- navigate_nldi(nldi_feature = hgsite_list,
+                                   mode = "UM",
+                                   distance = 200,
+                                   data_source = "")
+
+# make a list of all the comids we've identified:
+all_comids <- c(hgsite_us_flowlines$UM_flowlines$nhdplus_comid)
+
+
+# download all data and create a geopackage with the comid list
+hgsite_gpkg <- subset_nhdplus(comids= as.integer(all_comids),
+                            simplified = TRUE,
+                            overwrite = TRUE,
+                            output_file = paste0(here::here(), "/data/hgsite_nhdplus.gpkg"),
+                            nhdplus_data = "download",
+                            return_data = FALSE)
+
+# check layers in database:
+st_layers(paste0(here::here(), "/data/hgsite_nhdplus.gpkg"))
+
+# pull the flowlines back in
+hgsite_streams <- read_sf(paste0(here::here(), "/data/hgsite_nhdplus.gpkg"), "NHDFlowline_Network")
+
+# check with map
+mapview(hgsite, col.regions="black", cex=6, layer.name="Start Point") +
+  mapview(hgsite_streams, zcol="slope", legend=TRUE, layer.name="Reach <br> Slope")
+
+
+# reproject
+hgsite_streams_proj <- st_transform(hgsite_streams, crs=26910)
+hgsite_proj <- st_transform(hgsite, crs=26910)
+
+# snap to streamline
+st_snap_points <- function(x, y, namevar, max_dist = 1000) {
+
+  # this evaluates the length of the data
+  if (inherits(x, "sf")) n = nrow(x)
+  if (inherits(x, "sfc")) n = length(x)
+
+  # this part:
+  # 1. loops through every piece of data (every point)
+  # 2. snaps a point to the nearest line geometries
+  # 3. calculates the distance from point to line geometries
+  # 4. retains only the shortest distances and generates a point at that intersection
+  out = do.call(c,
+                lapply(seq(n), function(i) {
+                  nrst = st_nearest_points(st_geometry(x)[i], y)
+                  nrst_len = st_length(nrst)
+                  nrst_mn = which.min(nrst_len)
+                  if (as.vector(nrst_len[nrst_mn]) > max_dist) return(st_geometry(x)[i])
+                  return(st_cast(nrst[nrst_mn], "POINT")[2])
+                })
+  )
+  # this part converts the data to a dataframe and adds a named column of your choice
+  out_xy <- st_coordinates(out) %>% as.data.frame()
+  out_xy <- out_xy %>%
+    mutate({{namevar}} := x[[namevar]]) %>%
+    st_as_sf(coords=c("X","Y"), crs=st_crs(x), remove=FALSE)
+
+  return(out_xy)
+}
+
+
+# now snap points to the lines using a 500 meter buffer, select which ID column you want keep for rejoining
+poi_snapped <- st_snap_points(hgsite_proj, 
+                                hgsite_streams_proj,
+                                namevar = "identifier", 
+                                max_dist = 500)
+
+# create a 1 meter buffer around snapped point
+poi_snapped_buff <-  st_buffer(poi_snapped, 1)
+
+## convert to lINESTRING
+sp.lines = list()
+for(i in 1:nrow(hgsite_streams_proj)) {
+    sp.lines[[i]] = hgsite_streams_proj[i,]
+}
+segs <- do.call(rbind, sp.lines)
+
+library(rgeos)
+
+segs <- stplanr::line_breakup(segs,
+                                  st_buffer(stplanr::line2pointsn(segs), 1))
+mapview(segs)
+
+segs_points <- stplanr::line2pointsn(segs) %>%
+  distinct()
+
+segs_elevations <- sf::st_as_sf(segs_points, coords = c("x", "y"), crs = 26910) %>%
+  dplyr::select(-id) %>%
+  mutate(
+    elevatr::get_elev_point(segs_points$geom, src = 'aws', z = 14)
+  )
+
+segs_hr <- st_collection_extract(lwgeom::st_split(distinct(segs), st_buffer(segs_elevations, 1)), "LINESTRING") %>%
+  ## tibble::rownames_to_column(var = "rowid") %>%
+  ## mutate(rowid=as.integer(rowid)) %>%
+  ## stplanr::line_breakup(st_buffer(stplanr::line2pointsn(.), 1)) %>%
+  mutate(seg_len_m = units::drop_units(units::set_units(st_length(.), "m")),
+         seg_len_km = seg_len_m/1000) %>%
+  arrange(desc(hydroseq)) %>%
+  mutate(total_len_km = cumsum(seg_len_km)) %>%
+  # feed points to elevatr
+  mutate(
+    ## stplanr::line2points() %>%
+    elevation = elevatr::get_elev_point(stplanr::line_midpoint(.), src = 'aws', z = 14)$elevation
+  )
+
+segs_hr_calc <- segs_hr %>%
+    group_by(as.character(round(total_len_km, 0))) %>%
+    summarize(
+      elevation = mean(elevation),
+      longitudinal_km = mean(total_len_km),
+      longitudinal_m = mean(total_len_km * 1000),
+    ) %>%
+    mutate(
+      elevation_change = c(diff(elevation), NA),
+      longitudinal_km_change = c(diff(longitudinal_km), NA),
+      longitudinal_m_change = c(diff(longitudinal_m), NA),
+      gradient = (elevation_change * -1)/(longitudinal_m_change),
+      gradient_log10 = log10(gradient)
+    ) %>%
+    filter(!is.na(gradient))
+
+mapview(segs_hr_calc, zcol = 'gradient') +
+  ## mapview(segs_elevations, zcol="gradient", layer.name="Gradient") +  
+  mapview(poi_snapped, layer.name="POI Gage")
+
+station_gradient = 0.002618
+
+# Elvation along flowpath
+ggplot(segs_hr_calc) +
+  geom_point(aes(x = longitudinal_km, y = elevation, col = longitudinal_km), size = 2.75) +
+  ggtitle(paste('\nElevation (m) Along Flowpath (km) at', site_name),
+          subtitle = paste("USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
+
+# gradient along flowpath
+ggplot(segs_hr_calc) +
+  geom_point(aes(x = longitudinal_km, y = (gradient*-1), col = elevation), size = 2.75) +
+  ggtitle(paste('Gradient (dE/dL) Along Flowpath (km) at', site_name),
+          subtitle = paste("USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  ## scale_x_log10() +
+  ylab("Gradient dE/dL") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
+
+
+```
+
+Downstream site elevation profile
+
+```{r}
+
+# query site info
+site_info <- dataRetrieval::readNWISsite("01589352")
+site_name <- site_info$station_nm
+drainage_area_gage <- site_info$drain_area_va
+poi <- c(site_info$dec_long_va, site_info$dec_lat_va)
+
+# create a point from decimal long/lat
+hgsite <- st_sfc(st_point(poi), crs = 4326)
+
+# now figure out the nearest stream segment ID to our point
+hgsite_comid <- discover_nhdplus_id(hgsite)
+
+# first make a list defining the sourcetype and ID
+hgsite_list <- list(featureSource = "comid",
+                  featureID = hgsite_comid)
+
+# get upstream flowlines
+hgsite_us_flowlines <- navigate_nldi(nldi_feature = hgsite_list,
+                                   mode = "UM",
+                                   distance = 200,
+                                   data_source = "")
+
+# make a list of all the comids we've identified:
+all_comids <- c(hgsite_us_flowlines$UM_flowlines$nhdplus_comid)
+
+
+# download all data and create a geopackage with the comid list
+hgsite_gpkg <- subset_nhdplus(comids= as.integer(all_comids),
+                            simplified = TRUE,
+                            overwrite = TRUE,
+                            output_file = paste0(here::here(), "/data/hgsite_DS_nhdplus.gpkg"),
+                            nhdplus_data = "download",
+                            return_data = FALSE)
+
+# check layers in database:
+st_layers(paste0(here::here(), "/data/hgsite_DS_nhdplus.gpkg"))
+
+# pull the flowlines back in
+hgsite_DS_streams <- read_sf(paste0(here::here(), "/data/hgsite_DS_nhdplus.gpkg"), "NHDFlowline_Network")
+
+# check with map
+mapview(hgsite, col.regions="black", cex=6, layer.name="Start Point") +
+  mapview(hgsite_DS_streams, zcol="slope", legend=TRUE, layer.name="Reach <br> Slope")
+
+
+# reproject
+hgsite_streams_proj <- st_transform(hgsite_DS_streams, crs=26910)
+hgsite_proj <- st_transform(hgsite, crs=26910)
+
+
+# now snap points to the lines using a 500 meter buffer, select which ID column you want keep for rejoining
+poi_snapped <- st_snap_points(hgsite_proj, 
+                                hgsite_streams_proj,
+                                namevar = "identifier", 
+                                max_dist = 500)
+
+# create a 1 meter buffer around snapped point
+poi_snapped_buff <-  st_buffer(poi_snapped, 1)
+
+## convert to lINESTRING
+sp.lines = list()
+for(i in 1:nrow(hgsite_streams_proj)) {
+    sp.lines[[i]] = hgsite_streams_proj[i,]
+}
+segs <- do.call(rbind, sp.lines)
+
+segs <- stplanr::line_breakup(segs,
+                                  st_buffer(stplanr::line2pointsn(segs), 1))
+mapview(segs)
+
+segs_points <- stplanr::line2pointsn(segs) %>%
+  distinct()
+
+segs_elevations <- sf::st_as_sf(segs_points, coords = c("x", "y"), crs = 26910) %>%
+  dplyr::select(-id) %>%
+  mutate(
+    elevatr::get_elev_point(segs_points$geom, src = 'aws', z = 14)
+  )
+
+segs_hr <- st_collection_extract(lwgeom::st_split(distinct(segs), st_buffer(segs_elevations, 1)), "LINESTRING") %>%
+  ## tibble::rownames_to_column(var = "rowid") %>%
+  ## mutate(rowid=as.integer(rowid)) %>%
+  ## stplanr::line_breakup(st_buffer(stplanr::line2pointsn(.), 1)) %>%
+  mutate(seg_len_m = units::drop_units(units::set_units(st_length(.), "m")),
+         seg_len_km = seg_len_m/1000) %>%
+  arrange(desc(hydroseq)) %>%
+  mutate(total_len_km = cumsum(seg_len_km)) %>%
+  # feed points to elevatr
+  mutate(
+    ## stplanr::line2points() %>%
+    elevation = elevatr::get_elev_point(stplanr::line_midpoint(.), src = 'aws', z = 14)$elevation
+  )
+
+segs_hr_calc <- segs_hr %>%
+    group_by(as.character(round(total_len_km, 0))) %>%
+    summarize(
+      elevation = mean(elevation),
+      longitudinal_km = mean(total_len_km),
+      longitudinal_m = mean(total_len_km * 1000),
+    ) %>%
+    mutate(
+      elevation_change = c(diff(elevation), NA),
+      longitudinal_km_change = c(diff(longitudinal_km), NA),
+      longitudinal_m_change = c(diff(longitudinal_m), NA),
+      gradient = (elevation_change * -1)/(longitudinal_m_change),
+      gradient_log10 = log10(gradient)
+    ) %>%
+    filter(!is.na(gradient))
+
+mapview(segs_hr_calc, zcol = 'gradient') +
+  ## mapview(segs_elevations, zcol="gradient", layer.name="Gradient") +  
+  mapview(poi_snapped, layer.name="POI Gage")
+
+station_gradient = 0.002618
+
+# Elvation along flowpath
+ggplot(segs_hr_calc) +
+  geom_point(aes(x = longitudinal_km, y = elevation, col = longitudinal_km), size = 2.75) +
+  ggtitle(paste('\nElevation (m) Along Flowpath (km) at', site_name),
+          subtitle = paste("USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  theme_minimal() +
+  geom_hline(yintercept = 110, color = 'gray') + 
+  theme(
+    text = element_text(size = 26)
+  )
+
+# gradient along flowpath
+ggplot(segs_hr_calc) +
+  geom_point(aes(x = longitudinal_km, y = (gradient*-1), col = elevation), size = 2.75) +
+  ggtitle(paste('Gradient (dE/dL) Along Flowpath (km) at', site_name),
+          subtitle = paste("USGS", site_info$site_no)) +
+  scale_color_viridis() +
+  ## scale_x_log10() +
+  ylab("Gradient dE/dL") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 26)
+  )
+
+
+```
+
+Shear stress and grain size 
+
+```{r}
+
+title <- paste0("\n",siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nShear Stress (N/m^2) vs Grain Size (mm) ", start_year, " to ", end_year, "\n"
+                   )
+
+xlab = paste0("\nShear Stress (N/m^2)\n")
+ylab = paste0("\nGrain Size (mm)\n")
+gg.station.q_resistance <- ggplot(station.hg.df.2010_Now,
+                aes(
+                  x = shear_stress,
+                  y = grain_size*1000)
+                ) +
+  geom_vline(xintercept = 25.95, col = 'gray') +
+  geom_hline(yintercept = 35.65, col = 'gray') +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  ## scale_y_log10() +
+  ## scale_x_log10() +
+  ## ylim(-1.5, 1.5) +
+  ## xlim(1930, 2020) +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+# D84 = t / (1650 * 9.814 * 0.045)
+D84_bf = 1000 * bankfull_properties$bankfull_shear_stress / (1650 * 9.814 * 0.045 )
+
+
+D84_bf = 1000 * 25.94998 / (1650 * 9.814 * 0.045 )
+
+# t* for bankfull and peak flow
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Shear Stress")
+gg.station.q_resistance <- ggplot(station.hg.df.2010_Now,
+                aes(
+                  x = discharge_cms,
+                  y = shear_stress)
+                ) +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  geom_vline(xintercept = bankfull_discharge_cms, col = 'pink') +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+# get most recent HG coefs and exps``
+station.hg.recent <- station.hg.calc %>%
+  tail(6)
+
+station.hg.w = station.hg.recent[c(1,4),]
+station.hg.d = station.hg.recent[c(2,5),]
+station.hg.v = station.hg.recent[c(3,6),]
+
+# filter and enhance peak flow  dataframe
+station.peak.df <- station.peak.dmnls %>%
+    rename(datetime = peak_dt) %>%
+    mutate(
+      # useful time aggregations
+      year = lubridate::year(datetime),
+      decade = year - (year %% 10),
+      half_decade = case_when(year <= (decade + 5) ~ decade,
+                              year > (decade + 5) ~ decade + 5),
+      # convert all HG variables intor metric
+      discharge_cms = peak_va * 0.0283168,
+      chan_width_m =     station.hg.w$val[2] * discharge_cms **     station.hg.w$val[1],
+      chan_depth_m =     station.hg.d$val[2] * discharge_cms **     station.hg.d$val[1],
+      chan_velocity_ms = station.hg.v$val[2] * discharge_cms **     station.hg.v$val[1],
+      gage_ht_m = gage_ht * 0.3048,
+      # apply sn and slope equations
+      chan_sn = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "sn") ,
+      chan_slope = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "slope"),
+      # apply pgdS equation
+      shear_stress = hg.pgds(chan_depth_m, chan_velocity_ms, slope = chan_slope),
+      resistance = hg.resistance(shear_stress, chan_velocity_ms),
+      # grain size
+      grain_size = shear_stress / (729 * 1000)
+    )
+
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nPeak Annual Flow Data", start.date, " to ", end.date, "\ngeometry calculated with 2010-now hydraulic geometry equations\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Shear Stress")
+gg.station.q_resistance <- ggplot(station.peak.df,
+                aes(
+                  x = discharge_cms,
+                  y = shear_stress)
+                ) +
+  geom_vline(xintercept = bankfull_discharge_cms, col = 'pink') +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nPeak Annual Flow Data", start.date, " to ", end.date, "\ngeometry calculated with 2010-now hydraulic geometry equations\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Depth (m)")
+gg.station.q_resistance <- ggplot(station.peak.df,
+                aes(
+                  x = discharge_cms,
+                  y = chan_depth_m)
+                ) +
+  geom_vline(xintercept = bankfull_discharge_cms, col = 'pink') +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  scale_y_log10() +
+  scale_x_log10() +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+```
+
+Try and bring in CBP landcover data
+
+```{r}
+
+gfvn_ws <- sf::read_sf("./data/ws/site_ws.shp")
+
+mapview(gfvn_ws)
+
+
+mdlc <- terra::rast('./data/md_lc_2018_2022-Edition/md_lc_2018_2022-Edition.tif')
+
+
+gfvn_ws_proj <- sf::st_transform(gfvn_ws, crs(mdlc))
+
+ws_mask <- vect(gfvn_ws_proj)
+
+mdlc_gfvn <- crop(mdlc, ws_mask, mask = TRUE, overwrite = TRUE)
+
+plot(mdlc_gfvn)
+
+par(cex = 4)
+
+activeCat(mdlc_gfvn) <- 2
+
+mdlc_sum <- as.data.frame(freq(mdlc_gfvn))
+
+mdlc_total = sum(mdlc_sum$count)
+
+mdlc_df <- mdlc_sum %>%
+  mutate(percent = (count/(sum(mdlc_total))*100))
+
+mdlc_names = list(
+  "1746475.199"  = "water",
+  "3045246.056"  = "tree canopy",
+  "2385331.800"  = "low vegetation",
+  "31904.329"    = "barren",
+  "113557.875"   = "impervious surfaces",
+  "193195.575"   = "other impervious",
+  "131732.599"   = "impervious roads",
+  "6792.035"     = "tree canopy over impervious structures",
+  "23748.895"    = "tree canopy over other impervious",
+  "21796.787"    = "tree canopy over impervious roads"
+)
+
+mdlc_counts = c(
+  286772,
+  28768017,
+  29096740,
+  223878,
+  6439889,
+  7094048,
+  7721554,
+  186562,
+  475639,
+  524891
+)
+
+
+```
+
+```{r}
+
+station.hg.decades <- station.hg.df %>%
+  mutate(
+    decade = case_when(decade == 2020 ~ 2010, TRUE ~ decade)
+  ) %>%
+  group_by(decade) %>%
+  summarize(
+      b  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_width_m, verbose = F)[[2]],
+      f  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_depth_m, verbose = F)[[2]],
+      m  = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_velocity_ms, verbose = F)[[2]],
+      a = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_width_m, verbose = F)[[1]],
+      c = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_depth_m, verbose = F)[[1]],
+      k = hg.rating(discharge = discharge_va * 0.0283168, hg_var = chan_velocity_ms, verbose = F)[[1]],
+  ) %>%
+  mutate(
+      bfm__sum = b+f+m,
+      ack__product = a*c*k,
+      r = f/b,
+    )
+# get most recent HG coefs and exps``
+station.hg.recent <- station.hg.decades %>%
+  tail(9)
+
+station.hg.w = station.hg.recent[c(1,4),]
+station.hg.d = station.hg.recent[c(2,5),]
+station.hg.v = station.hg.recent[c(3,6),]
+
+# filter and enhance peak flow  dataframe
+station.peak.df <- station.peak.dmnls %>%
+    rename(datetime = peak_dt) %>%
+    mutate(
+      # useful time aggregations
+      year = lubridate::year(datetime),
+      decade = year - (year %% 10),
+      half_decade = case_when(year <= (decade + 5) ~ decade,
+                              year > (decade + 5) ~ decade + 5),
+      # convert all HG variables intor metric
+      discharge_cms = peak_va * 0.0283168,
+      chan_width_m =     station.hg.w$val[2] * discharge_cms **     station.hg.w$val[1],
+      chan_depth_m =     station.hg.d$val[2] * discharge_cms **     station.hg.d$val[1],
+      chan_velocity_ms = station.hg.v$val[2] * discharge_cms **     station.hg.v$val[1],
+      gage_ht_m = gage_ht * 0.3048,
+      # apply sn and slope equations
+      chan_sn = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "sn") ,
+      chan_slope = hg.sn.slope(chan_depth_m, chan_velocity_ms, metric = "slope"),
+      # apply pgdS equation
+      shear_stress = hg.pgds(chan_depth_m, chan_velocity_ms, slope = chan_slope),
+      resistance = hg.resistance(shear_stress, chan_velocity_ms),
+      # grain size
+      grain_size = shear_stress / (729 * 1000)
+    )
+
+
+title <- paste0(siteInfo$agency_cd, "-",
+                siteInfo$site_no, "  ",
+                siteInfo$station_nm)
+subtitle <- paste0("Drainage Area: ", siteInfo$drain_area_va, " sqmi        ",
+                   "lat, long:  ", siteInfo$dec_lat_va,
+                   ",",
+                   " ", siteInfo$dec_long_va,
+                   "\nPeak Annual Flow Data", start.date, " to ", end.date, "\ngeometry calculated with 2010-now hydraulic geometry equations\n"
+                   )
+colpal <- c("#A31621", "#FCB514", "#053C5E", "#A3162198", "#FCB51498", "#053C5E98")
+xlab = paste0("Discharge (cms)")
+ylab = paste0("Depth (m)")
+gg.station.q_resistance <- ggplot(station.peak.df,
+                aes(
+                  x = discharge_cms,
+                  y = chan_depth_m)
+                ) +
+  geom_vline(xintercept = bankfull_discharge_cms, col = 'pink') +
+        stat_poly_line() +
+        stat_poly_eq(use_label(c("eq", "R2", "p")),
+                     size = 10,
+                     label.y = 1 * c(0.75, 0.8, 0.85),
+                     ) +
+  ## facet_wrap(~) +
+  geom_point() +
+  theme_bw() +
+  theme(text = element_text(size = 34)) +
+  xlab(xlab) + 
+  ylab(ylab) +
+  scale_color_manual(values = colpal) +
+  ## scale_y_log10() +
+  ## scale_x_log10() +
+  ggtitle(title,
+          subtitle = subtitle)
+
+gg.station.q_resistance
+
+
+```
